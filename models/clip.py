@@ -37,6 +37,11 @@ class Clip(Base):
         nullable=True,
     )
 
+    cliplink: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
     reason: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

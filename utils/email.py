@@ -4,9 +4,7 @@ from email.message import EmailMessage
 from dotenv import load_dotenv
 from config.config import settings
 
-
 load_dotenv()
-
 
 SMTP_HOST = settings.SMTP_HOST
 SMTP_PORT = int(settings.SMTP_PORT)
