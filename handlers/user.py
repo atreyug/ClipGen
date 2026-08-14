@@ -187,4 +187,3 @@ def delete_user(
     }
 
 
-
