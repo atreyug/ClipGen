@@ -1,17 +1,18 @@
-import os
 import smtplib
 
 from email.message import EmailMessage
 from dotenv import load_dotenv
+from config.config import settings
+
 
 load_dotenv()
 
 
-SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-SMTP_FROM = os.getenv("SMTP_FROM")
+SMTP_HOST = settings.SMTP_HOST
+SMTP_PORT = int(settings.SMTP_PORT)
+SMTP_USERNAME = settings.SMTP_USERNAME
+SMTP_PASSWORD = settings.SMTP_PASSWORD
+SMTP_FROM = settings.SMTP_FROM
 
 
 def send_email(

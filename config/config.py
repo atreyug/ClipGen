@@ -13,5 +13,15 @@ class Config:
 
     DATABASE_URL: str = os.getenv("DATABASE_URL")
 
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY")
+
+    SMTP_HOST: str = os.getenv("SMTP_HOST")
+    SMTP_PORT: int = os.getenv("SMTP_PORT")
+    SMTP_USERNAME: str = os.getenv("SMTP_USERNAME")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD")
+    SMTP_FROM: str = os.getenv("SMTP_FROM")
+
+
+
 
 settings = Config()

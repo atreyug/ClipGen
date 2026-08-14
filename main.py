@@ -1,4 +1,4 @@
-from handlers import user, auth, clipping
+from handlers import user, auth, clipping, admin
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,7 @@ app.mount("/clips", StaticFiles(directory="clips"), name="clips")
 app.include_router(auth.router)
 app.include_router(user.router)
 app.include_router(clipping.router)
+app.include_router(admin.router)
 
 @app.get("/")
 def greet():
