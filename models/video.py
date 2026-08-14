@@ -11,7 +11,7 @@ from database.connection import Base
 class Video(Base):
     __tablename__ = "videos"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

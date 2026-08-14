@@ -1,8 +1,6 @@
 from handlers import user, auth, clipping, admin
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -18,10 +16,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-Path("videos").mkdir(exist_ok=True)
-Path("clips").mkdir(exist_ok=True)
-
-app.mount("/clips", StaticFiles(directory="clips"), name="clips")
 
 app.include_router(auth.router)
 app.include_router(user.router)
