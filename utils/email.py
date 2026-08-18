@@ -1,44 +1,124 @@
-import smtplib
-
+import os
+import base64
 from email.message import EmailMessage
-from dotenv import load_dotenv
+from pathlib import Path
+
+# Only for local/dev over http — remove once you're behind HTTPS in production
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+
 from config.config import settings
 
-load_dotenv()
 
-SMTP_HOST = settings.SMTP_HOST
-SMTP_PORT = int(settings.SMTP_PORT)
-SMTP_USERNAME = settings.SMTP_USERNAME
-SMTP_PASSWORD = settings.SMTP_PASSWORD
-SMTP_FROM = settings.SMTP_FROM
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send"
+]
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+CREDENTIALS_FILE = Path(settings.GMAIL_CREDENTIALS_FILE)
+TOKEN_FILE = Path(settings.GMAIL_TOKEN_FILE)
+
+REDIRECT_URI = settings.GMAIL_REDIRECT_URI
+
+
+def get_google_flow() -> Flow:
+    """
+    Create a Google OAuth flow for Gmail API authorization.
+    """
+
+    flow = Flow.from_client_secrets_file(
+        str(CREDENTIALS_FILE),
+        scopes=SCOPES,
+    )
+
+    flow.redirect_uri = REDIRECT_URI
+
+    return flow
+
+
+def get_gmail_service():
+    """
+    Load the stored Google OAuth credentials
+    and create a Gmail API service.
+    """
+
+    if not TOKEN_FILE.exists():
+        raise RuntimeError(
+            "Gmail API is not authorized. "
+            "Visit the Google OAuth authorization endpoint first."
+        )
+
+    creds = Credentials.from_authorized_user_file(
+        str(TOKEN_FILE),
+        SCOPES,
+    )
+
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+
+        TOKEN_FILE.write_text(
+            creds.to_json(),
+            encoding="utf-8",
+        )
+
+    if not creds.valid:
+        raise RuntimeError(
+            "Gmail OAuth credentials are invalid. "
+            "Authorize the Gmail API again."
+        )
+
+    return build(
+        "gmail",
+        "v1",
+        credentials=creds,
+    )
 
 
 def send_email(
     recipient: str,
     subject: str,
-    body: str
+    body: str,
 ):
-    if not SMTP_HOST:
-        raise ValueError("SMTP_HOST is not configured")
+    """
+    Send an email through the Gmail API.
+    """
 
-    if not SMTP_USERNAME:
-        raise ValueError("SMTP_USERNAME is not configured")
+    if not recipient:
+        raise ValueError("Recipient email is required")
 
-    if not SMTP_PASSWORD:
-        raise ValueError("SMTP_PASSWORD is not configured")
+    if not settings.GMAIL_SENDER:
+        raise ValueError("GMAIL_SENDER is not configured")
 
-    if not SMTP_FROM:
-        raise ValueError("SMTP_FROM is not configured")
+    service = get_gmail_service()
 
     message = EmailMessage()
 
-    message["Subject"] = subject
-    message["From"] = SMTP_FROM
     message["To"] = recipient
+    message["From"] = settings.GMAIL_SENDER
+    message["Subject"] = subject
 
     message.set_content(body)
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.send_message(message)
+    encoded_message = base64.urlsafe_b64encode(
+        message.as_bytes()
+    ).decode()
+
+    response = (
+        service.users()
+        .messages()
+        .send(
+            userId="me",
+            body={
+                "raw": encoded_message
+            },
+        )
+        .execute()
+    )
+
+    return response
