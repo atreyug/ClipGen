@@ -29,7 +29,8 @@ def chatbot(transcript, specification):
                 "start": 0.0,
                 "end": 0.0,
                 "viral_score": 0,
-                "reason": "string"
+                "reason": "string",
+                "text" : "transcript string"
             }
         ]
     }
@@ -77,7 +78,7 @@ def chatbot(transcript, specification):
     """
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",

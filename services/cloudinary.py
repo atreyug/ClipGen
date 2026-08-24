@@ -6,7 +6,6 @@ import cloudinary.uploader
 from config.config import settings
 
 
-# Configure Cloudinary once at module load using env vars
 cloudinary.config(
     cloud_name=settings.CLOUDINARY_CLOUD_NAME,
     api_key=settings.CLOUDINARY_API_KEY,

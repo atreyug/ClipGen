@@ -26,3 +26,6 @@ app.include_router(google_auth.router)
 @app.get("/")
 def greet():
     return {"message": "welcome to FastAPI"}
+
+
+#uvicorn main:app --host 0.0.0.0 --port 8000 --reload

@@ -6,7 +6,7 @@ def _get_model():
     global _model
     if _model is None:
         _model = WhisperModel(
-            "tiny",        # "tiny" uses ~150MB vs "small" ~500MB
+            "tiny",
             device="cpu",
             compute_type="int8"
         )

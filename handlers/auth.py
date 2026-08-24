@@ -314,13 +314,7 @@ def _check_otp(
     purpose: str,
     provided_otp: str,
 ) -> JSONResponse | None:
-    """
-    Fetch and validate an OTP record for (email, purpose).
-
-    Returns ``None`` on success — the record is deleted from the DB.
-    Returns a ``JSONResponse`` error response on any validation failure
-    so the caller can return it directly.
-    """
+    
     otp_record = (
         db.query(OTPVerification)
         .filter(
@@ -361,7 +355,6 @@ def _check_otp(
             content={"success": False, "message": "Invalid OTP", "data": {}},
         )
 
-    # OTP is valid — delete it so it cannot be reused
     db.delete(otp_record)
     db.commit()
     return None
