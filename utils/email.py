@@ -3,7 +3,6 @@ import base64
 from email.message import EmailMessage
 from pathlib import Path
 
-# Only for local/dev over http — remove once you're behind HTTPS in production
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
@@ -28,10 +27,6 @@ REDIRECT_URI = settings.GMAIL_REDIRECT_URI
 
 
 def get_google_flow() -> Flow:
-    """
-    Create a Google OAuth flow for Gmail API authorization.
-    """
-
     flow = Flow.from_client_secrets_file(
         str(CREDENTIALS_FILE),
         scopes=SCOPES,
@@ -43,11 +38,6 @@ def get_google_flow() -> Flow:
 
 
 def get_gmail_service():
-    """
-    Load the stored Google OAuth credentials
-    and create a Gmail API service.
-    """
-
     if not TOKEN_FILE.exists():
         raise RuntimeError(
             "Gmail API is not authorized. "
@@ -85,10 +75,6 @@ def send_email(
     subject: str,
     body: str,
 ):
-    """
-    Send an email through the Gmail API.
-    """
-
     if not recipient:
         raise ValueError("Recipient email is required")
 

@@ -9,9 +9,6 @@ router = APIRouter(
     tags=["Google OAuth"],
 )
 
-# Keyed by `state` so concurrent/parallel auth attempts don't overwrite
-# each other. Fine for local/single-instance dev; use Redis or a DB
-# table for multi-instance production deployments.
 _pending_flows: dict[str, object] = {}
 
 

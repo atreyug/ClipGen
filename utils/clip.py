@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from models import Clip, Video
 from services.analyze import chatbot
-from services.clipper import create_clips
+from services.clipper import create_clips_9_16, create_clips_16_9
 from services.cloudinary import (
     upload_clip_to_cloudinary,
     upload_video_to_cloudinary,
@@ -78,28 +78,42 @@ def create_video_record(
 def generate_clip_files(
     temp_video_path: str,
     specification: Optional[str],
+    dimensions: str,
+    caption: bool,
 ):
-    transcript = transcribe(temp_video_path)
-
+    transcript, all_words = transcribe(temp_video_path)
+ 
     result = chatbot(
         transcript,
         specification,
     )
-
+ 
     output_dir = tempfile.mkdtemp(
         prefix="clipgen_"
     )
 
-    output_paths = create_clips(
-        temp_video_path,
-        result["clips"],
-        output_dir=output_dir,
-    )
+    if dimensions == "9:16":
+        output_paths = create_clips_9_16(
+            temp_video_path,
+            result["clips"],
+            caption=caption,
+            output_dir=output_dir,
+            all_words=all_words,
+        )
 
+    if dimensions == "16:9":
+        output_paths = create_clips_16_9(
+            temp_video_path,
+            result["clips"],
+            caption=caption,
+            all_words=all_words,
+            output_dir=output_dir,
+        )
+ 
     return (
         output_paths,
         result["clips"],
-        output_dir,
+        output_dir
     )
 
 
@@ -168,6 +182,8 @@ def process_video_pipeline(
     original_filename: str,
     specification: Optional[str],
     db: Session,
+    dimensions: str,
+    caption: bool,
     current_user: dict,
 ) -> dict:
 
@@ -189,7 +205,10 @@ def process_video_pipeline(
         ) = generate_clip_files(
             temp_video_path=temp_video_path,
             specification=specification,
+            dimensions= dimensions,
+            caption = caption,
         )
+
 
         clips = save_clips(
             video_record=video_record,

@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,8 @@ class YouTubeDownloadRequest(BaseModel):
     url: HttpUrl
 
 
+
+
 router = APIRouter(
     prefix="/clip",
     tags=["Clipper"],
@@ -30,8 +32,10 @@ router = APIRouter(
 
 @router.post("/clips")
 def gen_clips(
+    dimensions: str = Form(...),
+    caption: bool = Form(False),
     file: UploadFile = File(...),
-    specification: Optional[str] = None,
+    specification: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -48,6 +52,8 @@ def gen_clips(
             specification=specification,
             db=db,
             current_user=current_user,
+            caption=caption,
+            dimensions=dimensions,
         )
 
     finally:
@@ -62,11 +68,15 @@ def gen_clips(
 
 @router.post("/yt_clipgen")
 def yt_clips(
-    request: YouTubeDownloadRequest,
-    specification: Optional[str] = None,
+    dimensions: str = Form(...),
+    caption: bool = Form(False),
+    request: YouTubeDownloadRequest = ...,
+    specification: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    # return "success"
+
     
     temp_video_path = None
 
@@ -90,6 +100,8 @@ def yt_clips(
             specification=specification,
             db=db,
             current_user=current_user,
+            caption = caption,
+            dimensions = dimensions
         )
 
     finally:
@@ -107,18 +119,85 @@ def get_my_vid(db: Session = Depends(get_db),current_user: dict = Depends(get_cu
     return video_links
 
 @router.get("/getmy_clips")
-def get_my_clips(db: Session = Depends(get_db),current_user: dict = Depends(get_current_user)):
-    videos = db.query(Video).filter(Video.user_id == current_user["user_id"]).all()
+def get_my_clips(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    videos = (db.query(Video).filter(Video.user_id == current_user["user_id"]).all())
 
-    clips=[]
+    result = []
+
     for video in videos:
-        clips.append(db.query(Clip).filter(Clip.video_id == video.id).all())
-    
-    clips_links = []
-    for i in clips:
-        for clip in i:
-            clips_links.append(clip.cliplink)
-    
-    return clips_links
-        
-        
+        clips = (db.query(Clip).filter(Clip.video_id == video.id).all())
+
+        result.append({
+            "video_id": video.id,
+            "video_link": video.videolink,
+            "clips": [
+                {
+                    "clip_id": clip.id,
+                    "clip_link": clip.cliplink
+                }
+                for clip in clips
+            ]
+        })
+
+    return result[::-1]
+
+
+@router.delete("/delvideo/{video_id}")
+def delete_video(
+    video_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    video = (
+        db.query(Video)
+        .filter(
+            Video.id == video_id,
+            Video.user_id == current_user["user_id"]
+        )
+        .first()
+    )
+
+    if not video:
+        raise HTTPException(
+            status_code=404,
+            detail="Video not found",
+        )
+
+    clips = (
+        db.query(Clip)
+        .filter(Clip.video_id == video.id)
+        .all()
+    )
+
+    for clip in clips:
+        if clip.cliplink:
+            clip_path = Path(clip.cliplink)
+
+            if clip_path.exists() and clip_path.is_file():
+                try:
+                    clip_path.unlink()
+                except OSError:
+                    pass
+
+        db.delete(clip)
+
+    if video.videolink:
+        video_path = Path(video.videolink)
+
+        if video_path.exists() and video_path.is_file():
+            try:
+                video_path.unlink()
+            except OSError:
+                pass
+
+    db.delete(video)
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Video and its clips deleted successfully",
+        "video_id": video_id,
+    }

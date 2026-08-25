@@ -2,6 +2,7 @@
 
 _model = None
 
+
 def _get_model():
     global _model
     if _model is None:
@@ -21,6 +22,7 @@ def transcribe(path: str):
     )
 
     transcript = []
+    all_words = []
 
     for segment in segments:
         transcript.append({
@@ -29,4 +31,19 @@ def transcribe(path: str):
             "text": segment.text.strip()
         })
 
-    return transcript
+        if not segment.words:
+            continue
+
+        for word in segment.words:
+            word_text = word.word.strip()
+
+            if not word_text:
+                continue
+
+            all_words.append({
+                "text": word_text,
+                "start": round(word.start, 3),
+                "end": round(word.end, 3),
+            })
+
+    return transcript, all_words

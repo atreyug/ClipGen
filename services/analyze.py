@@ -1,84 +1,63 @@
-from dotenv import load_dotenv
 import json
+from dotenv import load_dotenv
 from groq import Groq
 
 load_dotenv()
 
 client = Groq()
 
-def chatbot(transcript, specification):
+
+def chatbot(transcript, specification=""):
     user_query = f"""
-    I want to generate viral short-form clips from this transcript.
+    Analyze the provided transcript and extract viral short-form video clips (Shorts / Reels / TikTok).
 
-    Find the strongest hooks and moments that an audience would
-    likely enjoy.
+    USER SPECIFICATION:
+    "{specification if specification else 'Extract the most viral, captivating clips.'}"
 
-    You may merge multiple adjacent transcript segments into one clip.
-
-    Quality >>> quantity.
-
-    Return only valid JSON.
-
-    specific detail on which clips are to be generated: {specification} (if this query is related to the transcript then use it otherwise ignore)
+    TRANSCRIPT DATA:
+    {json.dumps(transcript, ensure_ascii=False, indent=2)}
     """
 
-    response_fmt = """
+    system_prompt = """
+    You are an expert video editor and viral content strategist.
+    Your task is to select viral video clips from a transcript.
+
+    CRITICAL RULES FOR CLIP BOUNDARIES (DO NOT VIOLATE):
+    1. NEVER cut a clip in the middle of an idea, sentence, or story arc.
+    2. A complete clip MUST contain:
+       - HOOK (First 2-3 seconds): Attention-grabbing opening.
+       - BODY: Full context/explanation.
+       - PAYOFF/CONCLUSION: A clear, satisfying ending or punchline.
+    3. DURATION REQUIREMENT:
+       - Minimum duration: 10 seconds.
+       - Maximum duration: 60 seconds.
+       - Do not create tiny 5-second or huge 2-minute clips.
+    4. TIMESTAMP PRECISION:
+       - The `start` time MUST match the EXACT `start` timestamp of the first segment in the clip.
+       - The `end` time MUST match the EXACT `end` timestamp of the last segment in the clip.
+       - Do NOT invent random float timestamps. Combine whole segments.
+
+    QUALITY OVER QUANTITY:
+    - Ensure clips are completely understandable to someone who hasn't watched the full video.
+
+    OUTPUT FORMAT:
+    Return strictly valid JSON with no preamble or explanation.
+
     {
         "clips": [
             {
-                "start": 0.0,
-                "end": 0.0,
-                "viral_score": 0,
-                "reason": "string",
-                "text" : "transcript string"
+                "start": float,
+                "end": float,
+                "viral_score": int,
+                "reason": "Why this moment is viral and how it has a complete hook and payoff",
+                "text": "Full concatenated text of all included segments"
             }
         ]
     }
     """
 
-    system_prompt = f"""
-    You are an AI assistant that identifies high-quality
-    short-form video clips from transcripts.
-
-    Analyze ONLY the provided transcript.
-
-    Look for:
-    - Strong hooks
-    - Curiosity
-    - Surprising statements
-    - Useful insights
-    - Emotional moments
-    - Funny moments
-    - Controversial or thought-provoking statements
-    - Complete standalone thoughts
-
-    Quality is more important than quantity.
-
-    A good clip should:
-    1. Start at a natural point.
-    2. Contain a complete idea.
-    3. Have a strong hook or interesting opening.
-    4. Have a satisfying payoff.
-    5. Work without requiring too much surrounding context.
-
-    You may combine adjacent transcript segments when necessary.
-
-    The start and end values MUST be timestamps in seconds.
-    Use decimal numbers, not MM:SS.
-
-    Return ONLY valid JSON.
-
-    Response format:
-    {response_fmt}
-
-    Order clips by decreasing viral_score.
-
-    Transcript:
-    {json.dumps(transcript, ensure_ascii=False)}
-    """
-
     response = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
+        model="openai/gpt-oss-120b", 
         messages=[
             {
                 "role": "system",
@@ -97,5 +76,3 @@ def chatbot(transcript, specification):
     return json.loads(
         response.choices[0].message.content
     )
-
-

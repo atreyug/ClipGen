@@ -37,9 +37,7 @@ def get_me(
 
 
 
-
-@router.post(
-    "/",
+@router.post("/",
     response_model=UserResponse,
     status_code=201
 )
