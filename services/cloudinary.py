@@ -49,3 +49,37 @@ def upload_clip_to_cloudinary(
         public_id=public_id,
         folder="clipgen/clips",
     )
+
+
+
+def delete_video_from_cloudinary(public_id: str) -> dict:
+    if not public_id.startswith("clipgen/videos/") and "/" not in public_id:
+        public_id = f"clipgen/videos/{public_id}"
+
+    try:
+        response = cloudinary.uploader.destroy(
+            public_id,
+            resource_type="video",
+            invalidate=True,  # Clears CDN cache immediately
+        )
+        return response
+    except Exception as exc:
+        print(f"[Cloudinary] Failed to delete video '{public_id}': {exc}")
+        return {"result": "error", "message": str(exc)}
+
+
+def delete_clip_from_cloudinary(public_id: str) -> dict:
+    
+    if not public_id.startswith("clipgen/clips/") and "/" not in public_id:
+        public_id = f"clipgen/clips/{public_id}"
+
+    try:
+        response = cloudinary.uploader.destroy(
+            public_id,
+            resource_type="video",
+            invalidate=True,  # Clears CDN cache immediately
+        )
+        return response
+    except Exception as exc:
+        print(f"[Cloudinary] Failed to delete clip '{public_id}': {exc}")
+        return {"result": "error", "message": str(exc)}

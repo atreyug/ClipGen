@@ -38,7 +38,8 @@ def create_and_send_otp(
 
     try:
         send_fn(email=email, otp=otp)
-    except Exception:
+    except Exception as e:
         db.delete(otp_record)
         db.commit()
-        raise RuntimeError("Failed to send OTP email")
+        raise RuntimeError(f"Failed to send OTP email: {e}")
+

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from models import Clip, Video
@@ -81,40 +81,55 @@ def generate_clip_files(
     dimensions: str,
     caption: bool,
 ):
+    dim_clean = str(dimensions).strip().lower()
+
+    if dim_clean not in ("9:16", "9_16", "16:9", "16_9"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid dimension '{dimensions}'. Must be '9:16' or '16:9'.",
+        )
+
     transcript, all_words = transcribe(temp_video_path)
- 
+    print("transcription done")
+
     result = chatbot(
         transcript,
         specification,
     )
- 
-    output_dir = tempfile.mkdtemp(
-        prefix="clipgen_"
-    )
+    print("analysis done")
 
-    if dimensions == "9:16":
-        output_paths = create_clips_9_16(
-            temp_video_path,
-            result["clips"],
-            caption=caption,
-            output_dir=output_dir,
-            all_words=all_words,
+    output_dir = tempfile.mkdtemp(prefix="clipgen_")
+
+    try:
+        if dim_clean in ("9:16", "9_16"):
+            output_paths = create_clips_9_16(
+                temp_video_path,
+                result.get("clips", []),
+                caption=caption,
+                output_dir=output_dir,
+                all_words=all_words,
+            )
+
+        else:
+            output_paths = create_clips_16_9(
+                temp_video_path,
+                result.get("clips", []),
+                caption=caption,
+                all_words=all_words,
+                output_dir=output_dir,
+            )
+        
+        print("clips created")
+
+        return (
+            output_paths,
+            result.get("clips", []),
+            output_dir,
         )
 
-    if dimensions == "16:9":
-        output_paths = create_clips_16_9(
-            temp_video_path,
-            result["clips"],
-            caption=caption,
-            all_words=all_words,
-            output_dir=output_dir,
-        )
- 
-    return (
-        output_paths,
-        result["clips"],
-        output_dir
-    )
+    except Exception:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
 
 
 def save_clips(
@@ -144,9 +159,9 @@ def save_clips(
             filename=clip_filename,
             start_time=clip["start"],
             end_time=clip["end"],
-            viral_score=clip.get("viral_score"),
+            viral_score=clip["viral_score"],
             cliplink=clip_url,
-            reason=clip.get("reason"),
+            reason=clip["reason"],
         )
 
         db.add(clip_record)
@@ -197,6 +212,7 @@ def process_video_pipeline(
             db=db,
             current_user=current_user,
         )
+        print("video saved")
 
         (
             output_paths,
@@ -209,6 +225,8 @@ def process_video_pipeline(
             caption = caption,
         )
 
+        print("clips generated")
+
 
         clips = save_clips(
             video_record=video_record,
@@ -216,6 +234,7 @@ def process_video_pipeline(
             clip_data=clip_data,
             db=db,
         )
+        print("clips saved")
 
         video_record.status = "processed"
 

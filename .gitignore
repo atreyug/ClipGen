@@ -179,3 +179,11 @@ pyrightconfig.json
 credentials.json
 token.json
 crd.json
+
+
+#analysis reports
+BACKEND_ANALYSIS_REPORT.md
+
+#test files
+test.py
+test.mp4
