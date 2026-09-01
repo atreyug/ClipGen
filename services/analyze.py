@@ -93,7 +93,7 @@ Return strictly a valid JSON object matching this schema:
       "start": 0.0,
       "end": 0.0,
       "viral_score": 0,
-      "reason": "Why this moment is viral (10 words max)"
+      "reason": "Why this moment is viral (5 words max)"
     }
   ]
 }

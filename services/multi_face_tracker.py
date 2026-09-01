@@ -4,13 +4,9 @@ services/multi_face_tracker.py
 DENSE per-frame face tracking using MediaPipe FaceLandmarker VIDEO mode.
 
 KEY CHANGES:
-- Tracks EVERY frame (not sampled) using detect_for_video() — MediaPipe's
-  temporal tracker handles motion blur, head turns, partial occlusions.
-- Timestamps in output timeline are CLIP-RELATIVE (0.0 .. duration).
-  This matches FFmpeg crop expression `t` exactly.
-- Coasting: briefly-lost faces hold/predict position instead of vanishing.
-- MAR (mouth aspect ratio) computed per face per frame in the SAME pass —
-  reused by speaker_detector for lip-sync analysis (no second video pass).
+- Fixed confidence scoring to prioritize faces by actual relevance (size, position, stability)
+- Better dominant face selection in multi-person scenarios
+- Speaking activity now influences face priority
 """
 
 from __future__ import annotations
@@ -36,10 +32,6 @@ except ImportError:
     _MP_AVAILABLE = False
     logger.warning("mediapipe not installed – MultiFaceTracker disabled.")
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Data structures
-# ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class FaceBox:
@@ -80,8 +72,12 @@ class TrackedFace:
     age: int = 0
     velocity_x: float = 0.0
     velocity_y: float = 0.0
-    mar: float = 0.0            # mouth aspect ratio (lip openness) this frame
-    is_coasted: bool = False    # True if position carried forward (not detected)
+    mar: float = 0.0
+    is_coasted: bool = False
+    # NEW: Better priority metrics
+    centrality_score: float = 0.0  # How centered the face is
+    size_score: float = 0.0        # Relative size of the face
+    stability_score: float = 1.0   # How stable tracking has been
 
 
 @dataclass
@@ -93,11 +89,38 @@ class FrameFaceData:
     def dominant_face(self) -> Optional[TrackedFace]:
         if not self.faces:
             return None
-        return max(self.faces, key=lambda f: f.box.area * f.box.confidence)
+
+        # Exclude coasted faces if we have real detections
+        real_faces = [f for f in self.faces if not f.is_coasted]
+        candidates = real_faces if real_faces else self.faces
+
+        # NEW: Multi-factor priority scoring
+        def priority_score(f: TrackedFace) -> float:
+            # Base score from detection quality
+            base = f.box.confidence
+            
+            # Size matters - larger faces are usually the subject
+            size = f.size_score * 2.0
+            
+            # Centrality - faces near center are often the subject
+            centrality = f.centrality_score * 1.5
+            
+            # Stability - faces that have been tracked longer are more reliable
+            stability = min(f.stability_score, 1.0) * 0.8
+            
+            # Age bonus - prefer established tracks over new detections
+            age_bonus = min(f.age / 30.0, 1.0) * 0.5
+            
+            # Penalize disappeared/coasted faces
+            disappear_penalty = max(0, 1.0 - (f.disappeared * 0.1))
+            
+            return (base + size + centrality + stability + age_bonus) * disappear_penalty
+
+        return max(candidates, key=priority_score)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Geometry helpers
+# Helper functions
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _iou(a: FaceBox, b: FaceBox) -> float:
@@ -110,15 +133,23 @@ def _iou(a: FaceBox, b: FaceBox) -> float:
     return inter / union if union > 0 else 0.0
 
 
-# MediaPipe FaceMesh landmark indices
+# Mouth landmarks for MAR calculation
 _INNER_UPPER = [13, 312, 311, 310, 415, 308]
 _INNER_LOWER = [14, 317, 402, 318, 324]
 _LEFT_CORNER = 61
 _RIGHT_CORNER = 291
 
 
-def _landmarks_to_box(landmarks, w: int, h: int, expand: bool = True) -> Tuple[FaceBox, float]:
-    """Tight bbox from 468 landmarks + mean visibility as confidence."""
+def _landmarks_to_box(landmarks, w: int, h: int, expand: bool = True) -> Tuple[FaceBox, Dict[str, float]]:
+    """
+    Tight bbox from 468 landmarks + quality metrics.
+    
+    Returns:
+        (FaceBox, metrics_dict) where metrics contains:
+        - 'detection_confidence': base detection quality
+        - 'centrality': how centered the face is (0-1)
+        - 'size_ratio': relative size of face in frame (0-1)
+    """
     xs = [lm.x * w for lm in landmarks]
     ys = [lm.y * h for lm in landmarks]
     x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
@@ -129,12 +160,43 @@ def _landmarks_to_box(landmarks, w: int, h: int, expand: bool = True) -> Tuple[F
         x1, y1 = max(0, x1 - ex), max(0, y1 - ey)
         x2, y2 = min(w, x2 + ex), min(h, y2 + ey)
 
+    # Base detection confidence from landmark visibility
     vis = np.mean([
         lm.visibility if hasattr(lm, "visibility") and lm.visibility is not None else 1.0
         for lm in landmarks
     ])
-    conf = float(np.clip(vis, 0.3, 1.0))
-    return FaceBox(x1=int(x1), y1=int(y1), x2=int(x2), y2=int(y2), confidence=conf), conf
+    detection_conf = float(np.clip(vis, 0.3, 1.0))
+    
+    # Calculate quality metrics
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    
+    # Centrality: how close to frame center (1.0 = perfectly centered)
+    frame_cx, frame_cy = w / 2.0, h / 2.0
+    dist_from_center = np.hypot(cx - frame_cx, cy - frame_cy)
+    max_dist = np.hypot(w / 2.0, h / 2.0)
+    centrality = 1.0 - min(dist_from_center / max_dist, 1.0)
+    
+    # Size ratio: face area relative to frame area
+    face_area = max(0, x2 - x1) * max(0, y2 - y1)
+    frame_area = w * h
+    size_ratio = min(face_area / frame_area, 1.0)
+    
+    metrics = {
+        'detection_confidence': detection_conf,
+        'centrality': centrality,
+        'size_ratio': size_ratio,
+    }
+    
+    box = FaceBox(
+        x1=int(x1), 
+        y1=int(y1), 
+        x2=int(x2), 
+        y2=int(y2), 
+        confidence=detection_conf
+    )
+    
+    return box, metrics
 
 
 def _compute_mar(landmarks) -> float:
@@ -156,14 +218,12 @@ def _compute_mar(landmarks) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Dense-frame IoU tracker (IDs locked by near-consecutive IoU ≈ 1.0)
+# Enhanced face tracking with better multi-person handling
 # ──────────────────────────────────────────────────────────────────────────────
 
 class FaceIDTracker:
     """
-    IoU-based identity tracker for DENSE frames.
-    Because consecutive frames barely move, IoU matching is near-perfect.
-    Supports coasting: lost faces keep last box + velocity prediction.
+    Enhanced IoU-based identity tracker with better multi-face discrimination.
     """
 
     def __init__(
@@ -177,58 +237,111 @@ class FaceIDTracker:
         self.smoothing = smoothing_factor
         self._next_id = 0
         self._faces: Dict[int, TrackedFace] = OrderedDict()
+        self._speaking_score: Dict[int, float] = {}
 
     def update(
         self,
         detections: List[FaceBox],
         mars: List[float],
+        metrics: List[Dict[str, float]],  # NEW: quality metrics per detection
         frame_w: int,
         frame_h: int,
         target_w: int,
     ) -> List[TrackedFace]:
         if not self._faces:
-            for det, mar in zip(detections, mars):
-                self._register(det, mar, frame_w, frame_h, target_w)
+            for det, mar, met in zip(detections, mars, metrics):
+                self._register(det, mar, met, frame_w, frame_h, target_w)
             return list(self._faces.values())
 
         if not detections:
             for tf in self._faces.values():
                 tf.disappeared += 1
                 tf.is_coasted = True
+                tf.stability_score *= 0.9  # Decay stability when coasting
                 self._coast(tf, frame_w, target_w)
+                self._speaking_score[tf.face_id] *= 0.95
             return list(self._faces.values())
 
         ids = list(self._faces.keys())
+        
+        # Build cost matrix for Hungarian matching
         cost = np.zeros((len(ids), len(detections)), dtype=float)
-
+        
         for i, fid in enumerate(ids):
+            tf = self._faces[fid]
             for j, det in enumerate(detections):
-                cost[i, j] = _iou(self._faces[fid].box, det)
+                iou_score = _iou(tf.box, det)
+                
+                # Spatial proximity for lost tracks
+                if iou_score < self.iou_threshold:
+                    pred_cx = tf.box.cx + tf.velocity_x
+                    pred_cy = tf.box.cy + tf.velocity_y
+                    centroid_dist = np.hypot(det.cx - pred_cx, det.cy - pred_cy)
+                    max_centroid_dist = min(200, max(frame_w, frame_h) * 0.15)
+                    
+                    if centroid_dist < max_centroid_dist:
+                        proximity_score = (1.0 - centroid_dist / max_centroid_dist) * 0.4
+                        iou_score = max(iou_score, proximity_score)
+                
+                # Size consistency
+                size_ratio = min(det.area, tf.box.area) / (max(det.area, tf.box.area) + 1e-6)
+                size_bonus = size_ratio * 0.2
+                
+                # Position prediction
+                pred_cx = tf.box.cx + tf.velocity_x
+                pred_cy = tf.box.cy + tf.velocity_y
+                dist = np.hypot(det.cx - pred_cx, det.cy - pred_cy)
+                max_dist = np.hypot(frame_w, frame_h)
+                position_bonus = (1.0 - min(dist / max_dist, 1.0)) * 0.15
+                
+                cost[i, j] = iou_score + size_bonus + position_bonus
+        
+        # Hungarian assignment
+        try:
+            from scipy.optimize import linear_sum_assignment
+            row_ind, col_ind = linear_sum_assignment(-cost)
+            matched_pairs = [
+                (ids[i], j) for i, j in zip(row_ind, col_ind)
+                if cost[i, j] >= self.iou_threshold
+            ]
+        except ImportError:
+            # Greedy fallback
+            matched_pairs = []
+            matched_ids_set, matched_dets_set = set(), set()
+            while cost.max() >= self.iou_threshold:
+                i, j = np.unravel_index(cost.argmax(), cost.shape)
+                fid = ids[i]
+                if fid not in matched_ids_set and j not in matched_dets_set:
+                    matched_pairs.append((fid, j))
+                    matched_ids_set.add(fid)
+                    matched_dets_set.add(j)
+                cost[i, :] = -1
+                cost[:, j] = -1
 
-        # Greedy match (dense frames → IoU matrix is nearly diagonal, greedy = optimal here)
-        matched_ids, matched_dets = set(), set()
-        while cost.max() >= self.iou_threshold:
-            i, j = np.unravel_index(cost.argmax(), cost.shape)
-            fid = ids[i]
-            if fid not in matched_ids and j not in matched_dets:
-                self._update_face(fid, detections[j], mars[j], frame_w, frame_h, target_w)
-                matched_ids.add(fid)
-                matched_dets.add(j)
-            cost[i, :] = -1
-            cost[:, j] = -1
+        matched_ids = {fid for fid, _ in matched_pairs}
+        matched_dets = {j for _, j in matched_pairs}
 
+        # Update matched faces
+        for fid, j in matched_pairs:
+            self._update_face(fid, detections[j], mars[j], metrics[j], frame_w, frame_h, target_w)
+
+        # Handle unmatched existing faces
         for fid in ids:
             if fid not in matched_ids:
                 tf = self._faces[fid]
                 tf.disappeared += 1
                 tf.is_coasted = True
+                tf.stability_score *= 0.85  # Decay stability
                 self._coast(tf, frame_w, target_w)
                 if tf.disappeared > self.max_disappeared:
                     del self._faces[fid]
+                    if fid in self._speaking_score:
+                        del self._speaking_score[fid]
 
+        # Register new faces
         for j, det in enumerate(detections):
             if j not in matched_dets:
-                self._register(det, mars[j], frame_w, frame_h, target_w)
+                self._register(det, mars[j], metrics[j], frame_w, frame_h, target_w)
 
         return list(self._faces.values())
 
@@ -237,15 +350,16 @@ class FaceIDTracker:
         pred_cx = tf.box.cx + tf.velocity_x * tf.disappeared
         half = target_w / 2
         new_crop = float(np.clip(pred_cx - half, 0, frame_w - target_w))
-        # light smoothing while coasting to avoid drift jitter
         tf.crop_x = new_crop
         tf.crop_x_smoothed = 0.15 * new_crop + 0.85 * tf.crop_x_smoothed
 
     def reset(self) -> None:
         self._faces.clear()
         self._next_id = 0
+        self._speaking_score.clear()
 
-    def _register(self, box: FaceBox, mar: float, frame_w: int, frame_h: int, target_w: int) -> int:
+    def _register(self, box: FaceBox, mar: float, metrics: Dict[str, float],
+                  frame_w: int, frame_h: int, target_w: int) -> int:
         cx = self._crop_x(box, frame_w, target_w)
         tf = TrackedFace(
             face_id=self._next_id,
@@ -253,27 +367,47 @@ class FaceIDTracker:
             crop_x=cx,
             crop_x_smoothed=cx,
             mar=mar,
+            centrality_score=metrics.get('centrality', 0.5),
+            size_score=metrics.get('size_ratio', 0.5),
+            stability_score=1.0,  # New tracks start stable
         )
         self._faces[self._next_id] = tf
+        self._speaking_score[self._next_id] = 0.0
         self._next_id += 1
         return tf.face_id
 
-    def _update_face(self, fid: int, box: FaceBox, mar: float,
+    def _update_face(self, fid: int, box: FaceBox, mar: float, metrics: Dict[str, float],
                      frame_w: int, frame_h: int, target_w: int) -> None:
         tf = self._faces[fid]
-        # velocity from consecutive dense frames
-        tf.velocity_x = 0.6 * (box.cx - tf.box.cx) + 0.4 * tf.velocity_x
-        tf.velocity_y = 0.6 * (box.cy - tf.box.cy) + 0.4 * tf.velocity_y
+        
+        # Update velocity
+        tf.velocity_x = 0.7 * (box.cx - tf.box.cx) + 0.3 * tf.velocity_x
+        tf.velocity_y = 0.7 * (box.cy - tf.box.cy) + 0.3 * tf.velocity_y
 
         tf.box = box
         tf.disappeared = 0
         tf.age += 1
         tf.is_coasted = False
         tf.mar = mar
+        
+        # Update quality metrics
+        tf.centrality_score = metrics.get('centrality', tf.centrality_score)
+        tf.size_score = metrics.get('size_ratio', tf.size_score)
+        
+        # Improve stability with successful updates
+        tf.stability_score = min(1.0, tf.stability_score * 0.95 + 0.05)
+
+        # Update speaking score
+        current_speaking = 1.0 if mar > 0.25 else 0.0
+        self._speaking_score[fid] = 0.8 * self._speaking_score.get(fid, 0.0) + 0.2 * current_speaking
 
         new_cx = self._crop_x(box, frame_w, target_w)
         tf.crop_x = new_cx
         tf.crop_x_smoothed = self.smoothing * new_cx + (1 - self.smoothing) * tf.crop_x_smoothed
+
+    def get_speaking_score(self, face_id: int) -> float:
+        """Get cumulative speaking activity score for a face."""
+        return self._speaking_score.get(face_id, 0.0)
 
     @staticmethod
     def _crop_x(box: FaceBox, frame_w: int, target_w: int) -> float:
@@ -282,36 +416,28 @@ class FaceIDTracker:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MultiFaceTracker — dense per-frame VIDEO-mode pipeline
+# Main tracker class
 # ──────────────────────────────────────────────────────────────────────────────
 
 class MultiFaceTracker:
     """
     Tracks faces at EVERY frame of the clip window using MediaPipe
     FaceLandmarker in VIDEO running mode (temporal tracking).
-
-    Output timeline:
-      - One FrameFaceData per processed frame
-      - timestamp = clip-relative seconds (0.0 .. duration)
-      - faces include coasted entries (is_coasted=True) so downstream
-        crop NEVER falls back to center mid-clip
-      - each face carries `mar` for lip-sync analysis
     """
 
-    # Lip landmarks for MAR (module-level reuse)
     _INNER_UPPER = _INNER_UPPER
     _INNER_LOWER = _INNER_LOWER
 
     def __init__(
         self,
         model_path: Optional[str] = None,
-        sample_interval: float = 0.5,      # kept for API compat (ignored in dense mode)
+        sample_interval: float = 0.5,
         max_faces: int = 4,
         min_confidence: float = 0.4,
         smoothing_factor: float = 0.35,
-        max_disappeared: Optional[int] = None,   # auto-set from fps
+        max_disappeared: Optional[int] = None,
         lip_analysis: bool = True,
-        infer_width: int = 960,            # downscale for inference speed
+        infer_width: int = 960,
     ):
         self.sample_interval = sample_interval
         self.lip_analysis = lip_analysis
@@ -349,7 +475,7 @@ class MultiFaceTracker:
                 num_faces=self._max_faces,
                 min_face_detection_confidence=self._min_confidence,
                 min_face_presence_confidence=self._min_confidence,
-                min_tracking_confidence=0.5,   # the magic: temporal tracking
+                min_tracking_confidence=0.5,
             )
             self._landmarker = vision.FaceLandmarker.create_from_options(opts)
             self._video_mode = True
@@ -370,7 +496,6 @@ class MultiFaceTracker:
                 logger.error("Landmarker init failed entirely: %s", e2)
                 self._landmarker = None
 
-        # Auto-tune coasting: ~1 second of frames
         self._tracker.max_disappeared = max(15, int(fps * 1.0))
 
     def process_video(
@@ -386,7 +511,7 @@ class MultiFaceTracker:
             return []
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        if fps <= 0 or fps != fps:  # NaN guard
+        if fps <= 0 or fps != fps:
             fps = 25.0
         frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -404,10 +529,9 @@ class MultiFaceTracker:
         start_frame = max(0, int(clip_start * fps))
         end_frame = int(end * fps)
 
-        # Adaptive stride: dense (1) for normal clips; larger for very long clips
         frames_in_window = max(1, end_frame - start_frame)
         stride = 1
-        if frames_in_window > 2700:  # >~90s @30fps
+        if frames_in_window > 2700:
             stride = int(math.ceil(frames_in_window / 2700))
             logger.info("Long clip — using frame stride %d", stride)
 
@@ -436,13 +560,11 @@ class MultiFaceTracker:
             ts_abs = frame_idx / fps
             ts_rel = max(0.0, ts_abs - clip_start)
 
-            # MediaPipe VIDEO mode needs strictly increasing ms timestamps
             ts_ms = int(round(ts_abs * 1000))
             if ts_ms <= last_ts_ms:
                 ts_ms = last_ts_ms + 1
             last_ts_ms = ts_ms
 
-            # Downscale for inference (landmarks are normalized → scale back after)
             if infer_scale < 1.0:
                 small = cv2.resize(
                     frame,
@@ -458,6 +580,8 @@ class MultiFaceTracker:
 
             detections: List[FaceBox] = []
             mars: List[float] = []
+            metrics_list: List[Dict[str, float]] = []
+            
             try:
                 if self._video_mode:
                     result = self._landmarker.detect_for_video(mp_image, ts_ms)
@@ -466,26 +590,30 @@ class MultiFaceTracker:
 
                 if result and result.face_landmarks:
                     for lms in result.face_landmarks:
-                        box, conf = _landmarks_to_box(lms, sw, sh)
-                        # scale back to full-res coordinates
+                        box, metrics = _landmarks_to_box(lms, sw, sh)
+                        
+                        # Scale back to original resolution
                         if infer_scale < 1.0:
                             inv = 1.0 / infer_scale
                             box = FaceBox(
                                 x1=int(box.x1 * inv), y1=int(box.y1 * inv),
                                 x2=int(box.x2 * inv), y2=int(box.y2 * inv),
-                                confidence=conf,
+                                confidence=box.confidence,
                             )
+                        
                         detections.append(box)
                         mars.append(_compute_mar(lms) if self.lip_analysis else 0.0)
+                        metrics_list.append(metrics)
+                        
             except Exception as exc:
                 logger.debug("Landmarker error @%.2fs: %s", ts_rel, exc)
 
             tracked = self._tracker.update(
-                detections, mars, frame_w, frame_h, target_w
+                detections, mars, metrics_list, frame_w, frame_h, target_w
             )
 
-            # Include coasted faces so timeline NEVER has holes
-            visible = [tf for tf in tracked if tf.disappeared <= self._tracker.max_disappeared]
+            # Keep only recently visible faces
+            visible = [tf for tf in tracked if tf.disappeared < 3]
 
             timeline.append(FrameFaceData(
                 timestamp=ts_rel,
@@ -501,12 +629,14 @@ class MultiFaceTracker:
                         velocity_y=tf.velocity_y,
                         mar=tf.mar,
                         is_coasted=tf.is_coasted,
+                        centrality_score=tf.centrality_score,
+                        size_score=tf.size_score,
+                        stability_score=tf.stability_score,
                     )
                     for tf in visible
                 ],
             ))
 
-            # Advance
             frame_idx += 1
             for _ in range(stride - 1):
                 if not cap.grab():
@@ -571,7 +701,7 @@ class MultiFaceTracker:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Convenience helpers
+# Public API
 # ──────────────────────────────────────────────────────────────────────────────
 
 def positions_for_face(
@@ -600,8 +730,6 @@ def get_multi_face_crop_positions(
 ) -> Dict[int, List[Tuple[float, float]]]:
     """
     Backward-compatible helper. Timestamps returned are CLIP-RELATIVE.
-    NOTE: prefer running MultiFaceTracker once and using positions_for_face()
-    instead of calling this (it re-decodes the video).
     """
     tracker = MultiFaceTracker(
         sample_interval=sample_interval,
@@ -631,7 +759,9 @@ def build_multi_crop_expression(
     frame_height: int,
     target_height: int,
 ) -> str:
-    """Time-dependent crop expression. Positions are (clip_relative_t, crop_x)."""
+    """
+    Time-dependent crop expression with proper nested if() syntax.
+    """
     if not positions:
         default_x = max(0, (frame_width - target_width) // 2)
         default_y = max(0, (frame_height - target_height) // 2)
@@ -644,24 +774,29 @@ def build_multi_crop_expression(
 
     y = max(0, (frame_height - target_height) // 2)
     max_x = frame_width - target_width
-    expr_parts = []
-
-    for i in range(len(positions) - 1):
+    
+    last_x = int(np.clip(positions[-1][1], 0, max_x))
+    last_x -= last_x % 2
+    x_expr = str(last_x)
+    
+    for i in range(len(positions) - 2, -1, -1):
         t0, x0 = positions[i]
         t1, x1 = positions[i + 1]
+        
         x0 = int(np.clip(x0, 0, max_x))
+        x0 -= x0 % 2
         x1 = int(np.clip(x1, 0, max_x))
-        if abs(t1 - t0) < 1e-6:
+        x1 -= x1 % 2
+        
+        dt = t1 - t0
+        if dt < 1e-6:
             continue
-        slope = (x1 - x0) / (t1 - t0)
+        
+        slope = (x1 - x0) / dt
         interp = f"{x0}+({slope:.4f}*(t-{t0:.4f}))"
         clamped = f"max(0\\,min({interp}\\,{max_x}))"
-        expr_parts.append(f"if(between(t\\,{t0:.4f}\\,{t1:.4f})\\,{clamped})")
-
-    if not expr_parts:
-        x = int(np.clip(positions[-1][1], 0, max_x))
-        return f"crop={target_width}:{target_height}:{x}:{y}"
-
-    last_x = int(np.clip(positions[-1][1], 0, max_x))
-    expr_parts.append(str(last_x))
-    return f"crop={target_width}:{target_height}:(" + "\\,".join(expr_parts) + f"):{y}"
+        x_expr = f"if(between(t\\,{t0:.4f}\\,{t1:.4f})\\,{clamped}\\,{x_expr})"
+    
+    x_even = f"2*trunc(({x_expr})/2)"
+    
+    return f"crop={target_width}:{target_height}:{x_even}:{y}"

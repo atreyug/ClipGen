@@ -1,132 +1,174 @@
+import logging
 import os
-from pathlib import Path
 from typing import Optional
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form, status
-from pydantic import BaseModel, HttpUrl
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, HttpUrl
 from sqlalchemy.orm import Session, joinedload
 
 from database.connection import get_db
+from utils.auth_guard import get_current_user
+from utils.clip import (
+    process_video_pipeline_advanced,
+    get_available_styles,
+    get_available_layouts,
+    save_upload_to_disk
+)
 from models import Clip, Video
 from services.yt_downloader import (
     YouTubeDownloadError,
     download_youtube_video,
 )
-from utils.auth_guard import get_current_user
-from utils.clip import process_video_pipeline, save_upload_to_disk
 from services.cloudinary import delete_video_from_cloudinary, delete_clip_from_cloudinary
 
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/clip", tags=["Clipping"])
 
 
-class YouTubeClipGenRequest(BaseModel):
-    url: HttpUrl
-    dimensions: str = "9:16"
-    caption: bool = False
-    specification: Optional[str] = None
-
-
-router = APIRouter(
-    prefix="/clip",
-    tags=["Clipper"],
-)
-
-
-@router.post("/clips")
-def gen_clips_from_upload(
-    dimensions: str = Form("9:16"),
-    caption: bool = Form(False),
-    file: UploadFile = File(...),
-    specification: Optional[str] = Form(None),
+@router.post("/clips", summary="Generate clips from uploaded file (advanced)")
+def create_clips_advanced_upload(
+    file: UploadFile = File(..., description="Video file to process"),
+    dimensions: str = Form("9:16", description="'9:16' or '16:9'"),
+    caption: bool = Form(True, description="Burn subtitles"),
+    caption_style: str = Form("classic", description="Caption style preset"),
+    specification: str = Form("", description="Topic hint for LLM"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    original_filename = file.filename or "video.mp4"
-    temp_video_path = None
+    """
+    Upload a video file and generate viral clips with advanced options.
+    SYNCHRONOUS endpoint - no async/await.
+    """
+    multi_face= True
+    speaker_detection = True
+    active_reframe = True
+    use_visual = True
+    max_faces=2
+    preferred_face_id=0
+    layout="single"
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided.")
 
-    try:
-        temp_video_path = save_upload_to_disk(file)
-
-        return process_video_pipeline(
-            temp_video_path=temp_video_path,
-            original_filename=original_filename,
-            specification=specification,
-            db=db,
-            current_user=current_user,
-            caption=caption,
-            dimensions=dimensions,
+    # Check file size before saving
+    file.file.seek(0, 2)  # Seek to end
+    file_size = file.file.tell()
+    file.file.seek(0)  # Reset
+    
+    if file_size > 2 * 1024 * 1024 * 1024:  # 2GB
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {file_size / 1024 / 1024:.1f}MB (max 2GB)"
         )
 
+    video_path = None
+    try:
+        # save_upload_to_disk should be synchronous
+        import asyncio
+        video_path = save_upload_to_disk(file)
+        
+        result = process_video_pipeline_advanced(
+            video_path=video_path,
+            user_id=str(current_user["user_id"]),
+            db=db,
+            dimensions=dimensions,
+            caption=caption,
+            caption_style=caption_style,
+            specification=specification,
+            multi_face=multi_face,
+            speaker_detection=speaker_detection,
+            active_reframe=active_reframe,
+            layout=layout,
+            max_faces=max_faces,
+            preferred_face_id=preferred_face_id,
+            use_visual=use_visual,
+            original_filename=file.filename,
+        )
+        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error("Advanced clip upload error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(exc)}")
     finally:
-        if temp_video_path and os.path.exists(temp_video_path):
+        if video_path and os.path.exists(video_path):
             try:
-                os.remove(temp_video_path)
+                os.remove(video_path)
             except OSError:
                 pass
-        file.file.close()
 
 
-@router.post("/yt_clipgen")
-def gen_clips_from_youtube(
-    request: YouTubeClipGenRequest,  
+class YTClipAdvancedRequest(BaseModel):
+    url: str = Field(..., description="YouTube video URL")
+    dimensions: str = Field("9:16", description="'9:16' or '16:9'")
+    caption: bool = Field(True, description="Burn subtitles")
+    caption_style: str = Field("classic", description="Caption style preset")
+    specification: str = Field("", description="Topic hint for LLM")
+
+
+@router.post("/yt_clipgen", summary="Generate clips from YouTube URL (advanced)")
+def create_clips_advanced_youtube(
+    body: YTClipAdvancedRequest,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    temp_video_path = None
+    
+    """Download YouTube video and generate clips with advanced options."""
+    from services.yt_downloader import download_youtube_video
+    from urllib.parse import urlparse
 
+    # Validate URL scheme
+    parsed = urlparse(body.url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Invalid URL scheme")
+
+    video_path = None
     try:
-        video_path = download_youtube_video(
-            str(request.url)
-        )
-    except YouTubeDownloadError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
+        logger.info("Downloading YouTube URL: %s", body.url)
+        video_path = download_youtube_video(body.url)
 
-    temp_video_path = str(video_path)
-    original_filename = video_path.name
-
-    try:
-        return process_video_pipeline(
-            temp_video_path=temp_video_path,
-            original_filename=original_filename,
-            specification=request.specification,
+        result = process_video_pipeline_advanced(
+            video_path=video_path,
+            user_id=str(current_user["user_id"]),
             db=db,
-            current_user=current_user,
-            caption = request.caption,
-            dimensions = request.dimensions
+            dimensions=body.dimensions,
+            caption=body.caption,
+            caption_style=body.caption_style,
+            specification=body.specification,
+            multi_face=True,
+            speaker_detection=True,
+            active_reframe=True,
+            layout="single",
+            max_faces=2,
+            preferred_face_id=0,
+            use_visual=True,
+            original_filename=os.path.basename(video_path),
         )
+        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
 
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error("Advanced YT clip error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(exc)}")
     finally:
-        if temp_video_path and os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
-
-
-# @router.get("/videos")
-# def get_my_videos(
-#     db: Session = Depends(get_db),
-#     current_user: dict = Depends(get_current_user),
-# ):
-#     videos = (
-#         db.query(Video)
-#         .filter(Video.user_id == current_user["user_id"])
-#         .order_by(Video.id.desc())
-#         .all()
-#     )
-
-#     return [
-#         {
-#             "id": video.id,
-#             "video_link": video.videolink,
-#             "created_at": getattr(video, "created_at", None),
-#         }
-#         for video in videos
-#     ]
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except OSError:
+                pass
 
 @router.get("/getmy_clips") #change krna hai
 def get_my_clips(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     videos = (db.query(Video).filter(Video.user_id == current_user["user_id"]).all())
-
+    videos.sort(key=lambda x: x.id, reverse=True)
     result = []
 
     for video in videos:
@@ -144,7 +186,7 @@ def get_my_clips(db: Session = Depends(get_db), current_user: dict = Depends(get
             ]
         })
 
-    return result[::-1]
+    return result
 
 
 @router.delete("/videos/{video_id}")
@@ -211,3 +253,11 @@ def delete_video_and_clips(
         "message": "Video and all its clips were deleted from Cloudinary and database successfully.",
         "video_id": video_id,
     }
+
+
+@router.get("/styles", summary="List available caption style presets")
+def list_caption_styles():
+    """Returns all available caption styles with metadata."""
+    return get_available_styles()
+
+
