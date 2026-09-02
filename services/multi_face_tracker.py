@@ -90,34 +90,25 @@ class FrameFaceData:
         if not self.faces:
             return None
 
-        # Exclude coasted faces if we have real detections
         real_faces = [f for f in self.faces if not f.is_coasted]
         candidates = real_faces if real_faces else self.faces
 
-        # NEW: Multi-factor priority scoring
         def priority_score(f: TrackedFace) -> float:
-            # Base score from detection quality
-            base = f.box.confidence
-            
-            # Size matters - larger faces are usually the subject
-            size = f.size_score * 2.0
-            
-            # Centrality - faces near center are often the subject
-            centrality = f.centrality_score * 1.5
-            
-            # Stability - faces that have been tracked longer are more reliable
-            stability = min(f.stability_score, 1.0) * 0.8
-            
-            # Age bonus - prefer established tracks over new detections
-            age_bonus = min(f.age / 30.0, 1.0) * 0.5
-            
-            # Penalize disappeared/coasted faces
-            disappear_penalty = max(0, 1.0 - (f.disappeared * 0.1))
-            
-            return (base + size + centrality + stability + age_bonus) * disappear_penalty
+            base        = f.box.confidence
+            size        = f.size_score * 2.0
+            centrality  = f.centrality_score * 1.5
+            stability   = min(f.stability_score, 1.0) * 0.8
+            age_bonus   = min(f.age / 30.0, 1.0) * 0.5
+            penalty     = max(0.0, 1.0 - f.disappeared * 0.1)
+
+            # 🗣️ SPEAKING BONUS — breaks ties when faces are same size/position
+            speaking_bonus = 0.0
+            if f.mar > 0.08:
+                speaking_bonus = min((f.mar - 0.08) / 0.22, 1.0) * 3.0
+
+            return (base + size + centrality + stability + age_bonus + speaking_bonus) * penalty
 
         return max(candidates, key=priority_score)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -238,6 +229,7 @@ class FaceIDTracker:
         self._next_id = 0
         self._faces: Dict[int, TrackedFace] = OrderedDict()
         self._speaking_score: Dict[int, float] = {}
+        self._smoothed_mar: Dict[int, float] = {}
 
     def update(
         self,
@@ -357,9 +349,9 @@ class FaceIDTracker:
         self._faces.clear()
         self._next_id = 0
         self._speaking_score.clear()
+        self._smoothed_mar.clear()
 
-    def _register(self, box: FaceBox, mar: float, metrics: Dict[str, float],
-                  frame_w: int, frame_h: int, target_w: int) -> int:
+    def _register(self, box: FaceBox, mar: float, metrics: Dict[str, float], frame_w: int, frame_h: int, target_w: int) -> int:
         cx = self._crop_x(box, frame_w, target_w)
         tf = TrackedFace(
             face_id=self._next_id,
@@ -369,18 +361,18 @@ class FaceIDTracker:
             mar=mar,
             centrality_score=metrics.get('centrality', 0.5),
             size_score=metrics.get('size_ratio', 0.5),
-            stability_score=1.0,  # New tracks start stable
+            stability_score=1.0,
         )
         self._faces[self._next_id] = tf
         self._speaking_score[self._next_id] = 0.0
+        self._smoothed_mar[self._next_id] = mar  # NEW
         self._next_id += 1
         return tf.face_id
 
-    def _update_face(self, fid: int, box: FaceBox, mar: float, metrics: Dict[str, float],
-                     frame_w: int, frame_h: int, target_w: int) -> None:
+    def _update_face(self, fid: int, box: FaceBox, mar: float, metrics: Dict[str, float], frame_w: int, frame_h: int, target_w: int) -> None:
         tf = self._faces[fid]
         
-        # Update velocity
+        # velocity
         tf.velocity_x = 0.7 * (box.cx - tf.box.cx) + 0.3 * tf.velocity_x
         tf.velocity_y = 0.7 * (box.cy - tf.box.cy) + 0.3 * tf.velocity_y
 
@@ -388,17 +380,22 @@ class FaceIDTracker:
         tf.disappeared = 0
         tf.age += 1
         tf.is_coasted = False
-        tf.mar = mar
-        
-        # Update quality metrics
+
+        # NEW: Smooth MAR with EMA (alpha=0.35 → ~8 frame memory at 25fps)
+        # This prevents brief mouth-close between syllables from killing speaking bonus
+        prev_smoothed = self._smoothed_mar.get(fid, mar)
+        alpha = 0.35
+        smoothed_mar = alpha * mar + (1 - alpha) * prev_smoothed
+        self._smoothed_mar[fid] = smoothed_mar
+        tf.mar = smoothed_mar  # Store smoothed MAR, not raw
+
+        # update quality metrics
         tf.centrality_score = metrics.get('centrality', tf.centrality_score)
         tf.size_score = metrics.get('size_ratio', tf.size_score)
-        
-        # Improve stability with successful updates
         tf.stability_score = min(1.0, tf.stability_score * 0.95 + 0.05)
 
-        # Update speaking score
-        current_speaking = 1.0 if mar > 0.25 else 0.0
+        # speaking score
+        current_speaking = 1.0 if smoothed_mar > 0.12 else 0.0
         self._speaking_score[fid] = 0.8 * self._speaking_score.get(fid, 0.0) + 0.2 * current_speaking
 
         new_cx = self._crop_x(box, frame_w, target_w)

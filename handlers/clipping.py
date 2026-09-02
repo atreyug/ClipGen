@@ -47,7 +47,7 @@ def create_clips_advanced_upload(
     active_reframe = True
     use_visual = True
     max_faces=2
-    preferred_face_id=0
+    preferred_face_id=None
     layout="single"
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
@@ -145,7 +145,7 @@ def create_clips_advanced_youtube(
             active_reframe=True,
             layout="single",
             max_faces=2,
-            preferred_face_id=0,
+            preferred_face_id=None,
             use_visual=True,
             original_filename=os.path.basename(video_path),
         )
