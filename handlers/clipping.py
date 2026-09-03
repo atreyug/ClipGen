@@ -270,6 +270,6 @@ def total_count(db: Session = Depends(get_db), current_user: dict = Depends(get_
     return {
         "video_count": video_count,
         "clip_count": clip_count,
-        "project_count":video_count + clip_count,
+        "project_assets":video_count + clip_count,
     }
 
