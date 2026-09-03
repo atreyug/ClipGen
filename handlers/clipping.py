@@ -256,4 +256,20 @@ def list_caption_styles():
     """Returns all available caption styles with metadata."""
     return get_available_styles()
 
+@router.get("/total_count")
+def total_count(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+
+    videos = (db.query(Video).filter(Video.user_id == current_user["user_id"]).all())
+    video_count = len(videos)
+    clip_count = 0
+    for video in videos:
+        clips = (db.query(Clip).filter(Clip.video_id == video.id).count())
+        clip_count += clips
+
+
+    return {
+        "video_count": video_count,
+        "clip_count": clip_count,
+        "project_count":video_count + clip_count,
+    }
 
