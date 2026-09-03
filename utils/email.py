@@ -1,73 +1,8 @@
-import os
-import base64
+import smtplib
+import ssl
 from email.message import EmailMessage
-from pathlib import Path
-
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
-
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
 
 from config.config import settings
-
-
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.send"
-]
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-CREDENTIALS_FILE = Path(settings.GMAIL_CREDENTIALS_FILE)
-TOKEN_FILE = Path(settings.GMAIL_TOKEN_FILE)
-
-REDIRECT_URI = settings.GMAIL_REDIRECT_URI
-
-
-def get_google_flow() -> Flow:
-    flow = Flow.from_client_secrets_file(
-        str(CREDENTIALS_FILE),
-        scopes=SCOPES,
-    )
-
-    flow.redirect_uri = REDIRECT_URI
-
-    return flow
-
-
-def get_gmail_service():
-    if not TOKEN_FILE.exists():
-        raise RuntimeError(
-            "Gmail API is not authorized. "
-            "Visit the Google OAuth authorization endpoint first."
-        )
-
-    creds = Credentials.from_authorized_user_file(
-        str(TOKEN_FILE),
-        SCOPES,
-    )
-
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-
-        TOKEN_FILE.write_text(
-            creds.to_json(),
-            encoding="utf-8",
-        )
-
-    if not creds.valid:
-        raise RuntimeError(
-            "Gmail OAuth credentials are invalid. "
-            "Authorize the Gmail API again."
-        )
-
-    return build(
-        "gmail",
-        "v1",
-        credentials=creds,
-    )
 
 
 def send_email(
@@ -78,33 +13,48 @@ def send_email(
     if not recipient:
         raise ValueError("Recipient email is required")
 
-    if not settings.GMAIL_SENDER:
-        raise ValueError("GMAIL_SENDER is not configured")
+    if not settings.SMTP_FROM:
+        raise ValueError("SMTP_FROM is not configured")
 
-    service = get_gmail_service()
+    if not settings.SMTP_HOST:
+        raise ValueError("SMTP_HOST is not configured")
 
     message = EmailMessage()
-
     message["To"] = recipient
-    message["From"] = settings.GMAIL_SENDER
+    message["From"] = settings.SMTP_FROM
     message["Subject"] = subject
-
     message.set_content(body)
 
-    encoded_message = base64.urlsafe_b64encode(
-        message.as_bytes()
-    ).decode()
+    context = ssl.create_default_context()
 
-    response = (
-        service.users()
-        .messages()
-        .send(
-            userId="me",
-            body={
-                "raw": encoded_message
-            },
-        )
-        .execute()
-    )
+    try:
+        if settings.SMTP_PORT == 465:
+            # Implicit TLS
+            with smtplib.SMTP_SSL(
+                settings.SMTP_HOST,
+                settings.SMTP_PORT,
+                context=context,
+                timeout=30,
+            ) as server:
+                if settings.SMTP_USERNAME and settings.SMTP_PASSWORD:
+                    server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                server.send_message(message)
+        else:
+            # STARTTLS (587 and most other ports)
+            with smtplib.SMTP(
+                settings.SMTP_HOST,
+                settings.SMTP_PORT,
+                timeout=30,
+            ) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                if settings.SMTP_USERNAME and settings.SMTP_PASSWORD:
+                    server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                server.send_message(message)
+    except smtplib.SMTPAuthenticationError as exc:
+        raise RuntimeError(f"SMTP authentication failed: {exc}") from exc
+    except smtplib.SMTPException as exc:
+        raise RuntimeError(f"Failed to send email via SMTP: {exc}") from exc
 
-    return response
+    return {"status": "sent", "to": recipient, "subject": subject}
