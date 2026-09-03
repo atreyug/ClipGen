@@ -102,7 +102,7 @@ def _ass_path(output_clip_path) -> Path:
 def _run_ffmpeg(command: List[str], description: str = "") -> None:
     try:
         subprocess.run(
-            command, check=True, capture_output=True, text=True, timeout=600,
+            command, check=True, capture_output=True, text=True, timeout=1200,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"FFmpeg timeout ({description})")

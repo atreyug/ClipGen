@@ -30,7 +30,7 @@ router = APIRouter(prefix="/clip", tags=["Clipping"])
 
 
 @router.post("/clips", summary="Generate clips from uploaded file (advanced)")
-def create_clips_advanced_upload(
+def create_clips_upload(
     file: UploadFile = File(..., description="Video file to process"),
     dimensions: str = Form("9:16", description="'9:16' or '16:9'"),
     caption: bool = Form(True, description="Burn subtitles"),
@@ -38,7 +38,7 @@ def create_clips_advanced_upload(
     specification: str = Form("", description="Topic hint for LLM"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
-):
+):  
     """
     Upload a video file and generate viral clips with advanced options.
     SYNCHRONOUS endpoint - no async/await.
@@ -53,18 +53,15 @@ def create_clips_advanced_upload(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
-    # Check file size before saving
-    file.file.seek(0, 2)  # Seek to end
+    file.file.seek(0, 2)
     file_size = file.file.tell()
-    file.file.seek(0)  # Reset
+    file.file.seek(0)
     
-    if file_size > 200 * 1024 * 1024:  # 200mb
+    if file_size > 2 * 1024 * 1024 * 1024:
         raise HTTPException(
             status_code=413,
-            detail=f"File too large: {file_size / 1024:.1f}MB (max 200MB)"
+            detail=f"File too large: {file_size / 1024 / 1024 / 1024:.1f}GB (max 2GB)"
         )
-
-    print("processing start")
 
     video_path = None
     try:
@@ -113,12 +110,11 @@ class YTClipAdvancedRequest(BaseModel):
 
 
 @router.post("/yt_clipgen", summary="Generate clips from YouTube URL (advanced)")
-def create_clips_advanced_youtube(
+def create_clips_youtube(
     body: YTClipAdvancedRequest,
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    # Validate URL scheme
     parsed = urlparse(body.url)
     if parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=400, detail="Invalid URL scheme")
