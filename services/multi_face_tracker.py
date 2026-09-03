@@ -90,25 +90,38 @@ class FrameFaceData:
         if not self.faces:
             return None
 
+        # Exclude coasted faces if we have real detections
         real_faces = [f for f in self.faces if not f.is_coasted]
         candidates = real_faces if real_faces else self.faces
 
+        # NEW: Multi-factor priority scoring
         def priority_score(f: TrackedFace) -> float:
-            base        = f.box.confidence
-            size        = f.size_score * 2.0
-            centrality  = f.centrality_score * 1.5
-            stability   = min(f.stability_score, 1.0) * 0.8
-            age_bonus   = min(f.age / 30.0, 1.0) * 0.5
-            penalty     = max(0.0, 1.0 - f.disappeared * 0.1)
-
-            # 🗣️ SPEAKING BONUS — breaks ties when faces are same size/position
+            # Base score from detection quality
+            base = f.box.confidence
+            
+            # Size matters - larger faces are usually the subject
+            size = f.size_score * 2.0
+            
+            # Centrality - faces near center are often the subject
+            centrality = f.centrality_score * 1.5
+            
+            # Stability - faces that have been tracked longer are more reliable
+            stability = min(f.stability_score, 1.0) * 0.8
+            
+            # Age bonus - prefer established tracks over new detections
+            age_bonus = min(f.age / 30.0, 1.0) * 0.5
+            
+            # Penalize disappeared/coasted faces
+            disappear_penalty = max(0, 1.0 - (f.disappeared * 0.1))
+            
             speaking_bonus = 0.0
             if f.mar > 0.08:
-                speaking_bonus = min((f.mar - 0.08) / 0.22, 1.0) * 3.0
+                speaking_bonus = min((f.mar - 0.08) / 0.22, 1.0) * 5.0
 
-            return (base + size + centrality + stability + age_bonus + speaking_bonus) * penalty
+            return (base + size + centrality + stability + age_bonus + speaking_bonus) * disappear_penalty
 
         return max(candidates, key=priority_score)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -229,7 +242,6 @@ class FaceIDTracker:
         self._next_id = 0
         self._faces: Dict[int, TrackedFace] = OrderedDict()
         self._speaking_score: Dict[int, float] = {}
-        self._smoothed_mar: Dict[int, float] = {}
 
     def update(
         self,
@@ -349,9 +361,9 @@ class FaceIDTracker:
         self._faces.clear()
         self._next_id = 0
         self._speaking_score.clear()
-        self._smoothed_mar.clear()
 
-    def _register(self, box: FaceBox, mar: float, metrics: Dict[str, float], frame_w: int, frame_h: int, target_w: int) -> int:
+    def _register(self, box: FaceBox, mar: float, metrics: Dict[str, float],
+                  frame_w: int, frame_h: int, target_w: int) -> int:
         cx = self._crop_x(box, frame_w, target_w)
         tf = TrackedFace(
             face_id=self._next_id,
@@ -361,18 +373,18 @@ class FaceIDTracker:
             mar=mar,
             centrality_score=metrics.get('centrality', 0.5),
             size_score=metrics.get('size_ratio', 0.5),
-            stability_score=1.0,
+            stability_score=1.0,  # New tracks start stable
         )
         self._faces[self._next_id] = tf
         self._speaking_score[self._next_id] = 0.0
-        self._smoothed_mar[self._next_id] = mar  # NEW
         self._next_id += 1
         return tf.face_id
 
-    def _update_face(self, fid: int, box: FaceBox, mar: float, metrics: Dict[str, float], frame_w: int, frame_h: int, target_w: int) -> None:
+    def _update_face(self, fid: int, box: FaceBox, mar: float, metrics: Dict[str, float],
+                     frame_w: int, frame_h: int, target_w: int) -> None:
         tf = self._faces[fid]
         
-        # velocity
+        # Update velocity
         tf.velocity_x = 0.7 * (box.cx - tf.box.cx) + 0.3 * tf.velocity_x
         tf.velocity_y = 0.7 * (box.cy - tf.box.cy) + 0.3 * tf.velocity_y
 
@@ -380,22 +392,17 @@ class FaceIDTracker:
         tf.disappeared = 0
         tf.age += 1
         tf.is_coasted = False
-
-        # NEW: Smooth MAR with EMA (alpha=0.35 → ~8 frame memory at 25fps)
-        # This prevents brief mouth-close between syllables from killing speaking bonus
-        prev_smoothed = self._smoothed_mar.get(fid, mar)
-        alpha = 0.35
-        smoothed_mar = alpha * mar + (1 - alpha) * prev_smoothed
-        self._smoothed_mar[fid] = smoothed_mar
-        tf.mar = smoothed_mar  # Store smoothed MAR, not raw
-
-        # update quality metrics
+        tf.mar = mar
+        
+        # Update quality metrics
         tf.centrality_score = metrics.get('centrality', tf.centrality_score)
         tf.size_score = metrics.get('size_ratio', tf.size_score)
+        
+        # Improve stability with successful updates
         tf.stability_score = min(1.0, tf.stability_score * 0.95 + 0.05)
 
-        # speaking score
-        current_speaking = 1.0 if smoothed_mar > 0.12 else 0.0
+        # Update speaking score
+        current_speaking = 1.0 if mar > 0.25 else 0.0
         self._speaking_score[fid] = 0.8 * self._speaking_score.get(fid, 0.0) + 0.2 * current_speaking
 
         new_cx = self._crop_x(box, frame_w, target_w)
@@ -430,16 +437,17 @@ class MultiFaceTracker:
         model_path: Optional[str] = None,
         sample_interval: float = 0.5,
         max_faces: int = 4,
-        min_confidence: float = 0.4,
+        min_confidence: float = 0.25,
         smoothing_factor: float = 0.35,
         max_disappeared: Optional[int] = None,
         lip_analysis: bool = True,
-        infer_width: int = 960,
+        infer_width: int = 1600,
     ):
         self.sample_interval = sample_interval
         self.lip_analysis = lip_analysis
         self.infer_width = infer_width
         self._landmarker = None
+        self._fallback_detector = None
         self._video_mode = False
 
         if not _MP_AVAILABLE:
@@ -494,6 +502,58 @@ class MultiFaceTracker:
                 self._landmarker = None
 
         self._tracker.max_disappeared = max(15, int(fps * 1.0))
+
+    def _init_fallback_detector(self) -> None:
+        """Initialize the far-face detector used when landmarks are missed."""
+        if self._fallback_detector is not None:
+            return
+        model_path = (
+            Path(__file__).resolve().parent.parent / "models" / "large_far.tflite"
+        )
+        if not model_path.exists():
+            logger.warning("Far-face detector model not found at %s", model_path)
+            return
+        try:
+            base = python.BaseOptions(model_asset_path=str(model_path))
+            options = vision.FaceDetectorOptions(
+                base_options=base,
+                running_mode=vision.RunningMode.IMAGE,
+                min_detection_confidence=self._min_confidence,
+            )
+            self._fallback_detector = vision.FaceDetector.create_from_options(options)
+            logger.info("Far-face detector enabled for landmark misses")
+        except Exception as exc:
+            logger.warning("Could not initialize far-face detector: %s", exc)
+            self._fallback_detector = None
+
+    def _detect_far_faces(
+        self,
+        image,
+        width: int,
+        height: int,
+    ) -> List[FaceBox]:
+        self._init_fallback_detector()
+        if self._fallback_detector is None:
+            return []
+        try:
+            result = self._fallback_detector.detect(image)
+        except Exception as exc:
+            logger.debug("Far-face detector failed: %s", exc)
+            return []
+
+        boxes = []
+        for detection in getattr(result, "detections", []) or []:
+            bbox = detection.bounding_box
+            x1 = max(0, int(bbox.origin_x))
+            y1 = max(0, int(bbox.origin_y))
+            x2 = min(width, x1 + int(bbox.width))
+            y2 = min(height, y1 + int(bbox.height))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            categories = getattr(detection, "categories", None) or []
+            confidence = float(categories[0].score) if categories else 1.0
+            boxes.append(FaceBox(x1, y1, x2, y2, confidence))
+        return boxes
 
     def process_video(
         self,
@@ -605,6 +665,40 @@ class MultiFaceTracker:
             except Exception as exc:
                 logger.debug("Landmarker error @%.2fs: %s", ts_rel, exc)
 
+            # FaceLandmarker often misses smaller faces in wide interview
+            # shots. Fill missing detections with the dedicated far-face
+            # detector so the crop never silently falls back to empty center.
+            if len(detections) < self._max_faces:
+                for fallback_box in self._detect_far_faces(mp_image, sw, sh):
+                    metrics = {
+                        "detection_confidence": fallback_box.confidence,
+                        "centrality": 1.0 - min(
+                            np.hypot(fallback_box.cx - sw / 2, fallback_box.cy - sh / 2)
+                            / max(np.hypot(sw / 2, sh / 2), 1.0),
+                            1.0,
+                        ),
+                        "size_ratio": min(fallback_box.area / max(sw * sh, 1), 1.0),
+                    }
+
+                    if infer_scale < 1.0:
+                        inv = 1.0 / infer_scale
+                        fallback_box = FaceBox(
+                            x1=int(fallback_box.x1 * inv),
+                            y1=int(fallback_box.y1 * inv),
+                            x2=int(fallback_box.x2 * inv),
+                            y2=int(fallback_box.y2 * inv),
+                            confidence=fallback_box.confidence,
+                        )
+
+                    if any(_iou(fallback_box, existing) > 0.35 for existing in detections):
+                        continue
+
+                    detections.append(fallback_box)
+                    mars.append(0.0)
+                    metrics_list.append(metrics)
+                    if len(detections) >= self._max_faces:
+                        break
+
             tracked = self._tracker.update(
                 detections, mars, metrics_list, frame_w, frame_h, target_w
             )
@@ -647,6 +741,12 @@ class MultiFaceTracker:
         except Exception:
             pass
         self._landmarker = None
+        if self._fallback_detector is not None:
+            try:
+                self._fallback_detector.close()
+            except Exception:
+                pass
+            self._fallback_detector = None
 
         timeline = self._smooth_timeline(timeline)
 
@@ -695,6 +795,12 @@ class MultiFaceTracker:
             except Exception:
                 pass
             self._landmarker = None
+        if self._fallback_detector is not None:
+            try:
+                self._fallback_detector.close()
+            except Exception:
+                pass
+            self._fallback_detector = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────

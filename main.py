@@ -1,4 +1,4 @@
-from handlers import user, auth, clipping, admin, google_auth, clipping_advanced
+from handlers import user, auth, clipping, admin, google_auth
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +22,6 @@ app.include_router(user.router)
 app.include_router(clipping.router)
 app.include_router(admin.router)
 app.include_router(google_auth.router)
-# app.include_router(clipping_advanced.router)
 
 
 @app.get("/")

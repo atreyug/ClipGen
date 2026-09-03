@@ -7,7 +7,7 @@ load_dotenv()
 class Config:
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY")
     ACCESS_TOKEN_EXPIRES_IN: int = int(
-        os.getenv("ACCESS_TOKEN_EXPIRES_IN", 10080)
+        os.getenv("ACCESS_TOKEN_EXPIRES_IN")
     )
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 

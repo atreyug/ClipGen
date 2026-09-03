@@ -10,12 +10,12 @@ IMPROVED: Better speaker-to-face mapping with temporal windowing and multi-modal
 from __future__ import annotations
 
 import os
+import importlib
 import logging
 import subprocess
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any ,Dict ,List ,Optional ,Tuple
 
 import numpy as np
@@ -23,16 +23,14 @@ import numpy as np
 logger =logging .getLogger (__name__ )
 
 try :
-    from pyannote .audio import Pipeline as PyannotePipeline
-    _PYANNOTE_AVAILABLE =True
+    _pyannote_audio =importlib .import_module ("pyannote.audio")
 except ImportError :
-    _PYANNOTE_AVAILABLE =False
+    _pyannote_audio =None
 
 try :
-    import torch
-    _TORCH_AVAILABLE =True
+    _torch =importlib .import_module ("torch")
 except ImportError :
-    _TORCH_AVAILABLE =False
+    _torch =None
 
 @dataclass
 class SpeakerSegment :
@@ -41,6 +39,10 @@ class SpeakerSegment :
     end :float
     face_id :Optional [int ]=None
     confidence :float =1.0
+    # Energy-based VAD can tell us that speech is present, but it cannot tell
+    # which person produced it.  Keep that distinction explicit so a generic
+    # SPEAKER_00 label does not get permanently attached to one visible face.
+    identity_reliable :bool =True
 
 @dataclass
 class WordWithSpeaker :
@@ -51,6 +53,8 @@ class WordWithSpeaker :
     face_id :Optional [int ]=None
 
 def _extract_audio_wav (video_path :str ,out_wav :Optional [str ]=None )->str :
+    created_temp =out_wav is None
+    completed =False
     if out_wav is None :
         fd ,out_wav =tempfile .mkstemp (suffix =".wav")
         os .close (fd )
@@ -69,9 +73,16 @@ def _extract_audio_wav (video_path :str ,out_wav :Optional [str ]=None )->str :
         result =subprocess .run (cmd ,capture_output =True ,text =True ,timeout =120 )
         if result .returncode !=0 :
             raise RuntimeError (f"FFmpeg failed: {result .stderr }")
+        completed =True
         return out_wav
     except subprocess .TimeoutExpired :
         raise RuntimeError ("Audio extraction timed out")
+    finally :
+        if created_temp and not completed and out_wav and os .path .exists (out_wav ):
+            try :
+                os .remove (out_wav )
+            except OSError :
+                pass
 
 class AudioSpeakerDiarizer :
     def __init__ (
@@ -83,16 +94,16 @@ class AudioSpeakerDiarizer :
         self .hf_token =hf_token or os .environ .get ("HUGGINGFACE_TOKEN","")
         self .min_speakers =min_speakers
         self .max_speakers =max_speakers
-        self ._pipeline =None
+        self ._pipeline :Any =None
 
-        if _PYANNOTE_AVAILABLE and self .hf_token :
+        if _pyannote_audio is not None and self .hf_token :
             try :
-                self ._pipeline =PyannotePipeline .from_pretrained (
+                self ._pipeline =_pyannote_audio .Pipeline .from_pretrained (
                 "pyannote/speaker-diarization-3.1",
                 use_auth_token =self .hf_token ,
                 )
-                if _TORCH_AVAILABLE and torch .cuda .is_available ():
-                    self ._pipeline .to (torch .device ("cuda"))
+                if _torch is not None and _torch .cuda .is_available ():
+                    self ._pipeline .to (_torch .device ("cuda"))
                     logger .info ("pyannote on CUDA")
                 else :
                     logger .info ("pyannote on CPU")
@@ -208,9 +219,13 @@ class AudioSpeakerDiarizer :
             elif rms <=threshold and in_seg :
                 in_seg =False
                 if t -seg_start >0.2 :
-                    segs .append (SpeakerSegment ("SPEAKER_00",seg_start ,t ))
+                    segs .append (SpeakerSegment (
+                    "SPEAKER_00",seg_start ,t ,identity_reliable =False
+                    ))
         if in_seg and energies :
-            segs .append (SpeakerSegment ("SPEAKER_00",seg_start ,energies [-1 ][0 ]))
+            segs .append (SpeakerSegment (
+            "SPEAKER_00",seg_start ,energies [-1 ][0 ],identity_reliable =False
+            ))
 
         return self ._merge_short (segs ,max_gap =0.3 )
 
@@ -419,6 +434,14 @@ class SpeakerDetector :
         Score faces per audio segment: visual speaking overlap >> area >> age.
         """
         for seg in audio_segs :
+            # VAD segments contain speech timing only.  Assigning one of them
+            # to a face would make the active reframer strongly prefer that
+            # face for the whole utterance, even when another person speaks.
+            # The reframer uses dense, short-window mouth activity instead.
+            if not seg .identity_reliable :
+                seg .face_id =None
+                continue
+
             seg_dur =max (1e-6 ,seg .end -seg .start )
 
             padding =0.2
@@ -489,7 +512,9 @@ class SpeakerDetector :
                 if scores [seg .face_id ]['visual_speaking']>20.0 :
                     seg .confidence =min (1.0 ,seg .confidence *1.3 )
 
-        self ._enforce_speaker_consistency (audio_segs )
+        self ._enforce_speaker_consistency (
+        [seg for seg in audio_segs if seg .identity_reliable ]
+        )
 
     def _enforce_speaker_consistency (self ,audio_segs :List [SpeakerSegment ])->None :
         """
@@ -543,6 +568,8 @@ class SpeakerDetector :
         votes :Dict [str ,Dict [int ,float ]]=defaultdict (lambda :defaultdict (float ))
         for fd in face_timeline :
             for seg in audio_segs :
+                if not seg .identity_reliable :
+                    continue
                 if seg .start <=fd .timestamp <=seg .end :
                     for face in fd .faces :
                         votes [seg .speaker_id ][face .face_id ]+=face .box .area
@@ -551,7 +578,10 @@ class SpeakerDetector :
         for spk ,fv in votes .items ()if fv
         }
         for seg in audio_segs :
-            seg .face_id =mapping .get (seg .speaker_id )
+            if seg .identity_reliable :
+                seg .face_id =mapping .get (seg .speaker_id )
+            else :
+                seg .face_id =None
 
 def detect_speakers (
 video_path :str ,

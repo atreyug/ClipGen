@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import os
+import tempfile
+
 from services.multi_face_tracker import (
     MultiFaceTracker,
     positions_for_face,
@@ -44,11 +47,16 @@ class ClipOptions:
     hf_token: Optional[str] = None
     use_visual_speaker: bool = True
     active_speaker_reframe: bool = False
-    reframe_transition_sec: float = 0.6
+    reframe_transition_sec: float = 0.25
     layout: str = "auto"
     preferred_face_id: Optional[int] = None
     crf: int = 23
     preset: str = "veryfast"
+
+    def __post_init__(self) -> None:
+        # The API accepts both 9:16 and 9_16 spellings.  Normalize once so
+        # every crop calculation sees the same canonical value.
+        self.dimensions = str(self.dimensions).strip().lower().replace("_", ":")
 
 
 def _escape_path_for_filter(path: str | Path) -> str:
@@ -61,7 +69,7 @@ def _escape_path_for_filter(path: str | Path) -> str:
     return path_str
 
 
-def _get_video_info(video_path) -> Tuple[int, int, float]:
+def _get_video_info(video_path) -> Tuple[int, int]:
     try:
         import json
         command = [
@@ -76,15 +84,15 @@ def _get_video_info(video_path) -> Tuple[int, int, float]:
             if stream.get("codec_type") == "video":
                 w = int(stream.get("width", 1920))
                 h = int(stream.get("height", 1080))
-                fps_str = stream.get("r_frame_rate", "25/1")
-                num, den = map(int, fps_str.split("/"))
-                fps = num / den if den else 25.0
-                if fps <= 0:
-                    fps = 25.0
-                return w, h, fps
+                # fps_str = stream.get("r_frame_rate", "25/1")
+                # num, den = map(int, fps_str.split("/"))
+                # fps = num / den if den else 25.0
+                # if fps <= 0:
+                #     fps = 25.0
+                return w, h
     except Exception as exc:
         print(f"[VideoInfo] ffprobe failed ({exc}) — defaults used.")
-    return 1920, 1080, 25.0
+    return 1920, 1080
 
 
 def _ass_path(output_clip_path) -> Path:
@@ -128,7 +136,7 @@ def clip_video_advanced(
     if clip_duration > 600:
         raise ValueError(f"Clip too long: {clip_duration:.1f}s (max 600s)")
 
-    frame_width, frame_height, fps = _get_video_info(input_path)
+    frame_width, frame_height= _get_video_info(input_path)
 
     print(
         f"[Clip Advanced] clip={clip_start:.2f}-{clip_end:.2f} "
@@ -202,7 +210,6 @@ def clip_video_advanced(
         frame_width=frame_width,
         frame_height=frame_height,
         clip_duration=clip_duration,
-        fps=fps,
     )
 
     # ── 4. Captions ──
@@ -258,7 +265,6 @@ def _build_video_filter(
     frame_width: int,
     frame_height: int,
     clip_duration: float,
-    fps: float,
 ) -> str:
     # Priority 1: active-speaker reframe (dense timeline → smooth, correct t-domain)
     if options.active_speaker_reframe and face_timeline:
@@ -271,7 +277,6 @@ def _build_video_filter(
             target_aspect=options.dimensions,
             transition_sec=options.reframe_transition_sec,
             smooth=True,
-            fps=fps,
         )
 
     # Priority 2: multi-face — positions straight from the timeline (no re-decode)
@@ -350,33 +355,90 @@ def _render_clip(
     duration = clip_end - clip_start
 
     base_command = [
-        "ffmpeg", "-y",
-        "-ss", str(clip_start),
-        "-i", str(input_path),
-        "-t", str(duration),
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(clip_start),
+        "-i",
+        str(input_path),
+        "-t",
+        str(duration),
     ]
 
     encode_opts = [
-        "-c:v", "libx264",
-        "-preset", options.preset,
-        "-crf", str(options.crf),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-movflags", "+faststart",
+        "-c:v",
+        "libx264",
+        "-preset",
+        options.preset,
+        "-crf",
+        str(options.crf),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
     ]
 
     ass_filter = None
+
     if ass_path is not None:
-        ass_filter = f"ass=filename={_escape_path_for_filter(ass_path)}"
+        ass_filter = (
+            f"ass=filename={_escape_path_for_filter(ass_path)}"
+        )
 
     filters = [f for f in (vf_filter, ass_filter) if f]
-    if filters:
-        command = base_command + ["-vf", ",".join(filters)] + encode_opts + [str(output_path)]
-    else:
-        command = base_command + ["-c:v", "copy", "-c:a", "copy", str(output_path)]
 
-    _run_ffmpeg(command, description=f"clip {clip_start}-{clip_end}")
+    filter_script_path = None
 
+    try:
+        if filters:
+            # Put the potentially huge filter string into a file
+            filter_content = ",".join(filters)
+
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".ffscript",
+                delete=False,
+                encoding="utf-8",
+            ) as filter_file:
+                filter_file.write(filter_content)
+                filter_script_path = filter_file.name
+
+            command = (
+                base_command
+                + [
+                    "-filter_script:v",
+                    filter_script_path,
+                ]
+                + encode_opts
+                + [str(output_path)]
+            )
+
+        else:
+            command = (
+                base_command
+                + [
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "copy",
+                    str(output_path),
+                ]
+            )
+
+        _run_ffmpeg(
+            command,
+            description=f"clip {clip_start}-{clip_end}",
+        )
+
+    finally:
+        # Always remove the temporary filter script
+        if filter_script_path:
+            try:
+                os.remove(filter_script_path)
+            except OSError:
+                pass
 
 def create_clips_advanced(
     input_path,

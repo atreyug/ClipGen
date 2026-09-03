@@ -1,15 +1,3 @@
-"""
-utils/clip_advanced.py
-───────────────────────
-Extended video processing pipeline orchestration.
-
-FIXES:
-- Made all functions synchronous (removed broken async)
-- Added proper file validation
-- Improved error context
-- Added duration limits
-"""
-
 import os
 import shutil
 import tempfile
@@ -30,6 +18,7 @@ from models import Clip, Video
 
 from services.transcribe import transcribe
 from services.analyze import chatbot
+from services.clip_selection import fallback_clip_suggestions
 from services.clipper import (
     ClipOptions,
     create_clips_advanced,
@@ -129,9 +118,15 @@ def generate_clip_files_advanced(
 
     llm_clips = result.get("clips", [])
     if not llm_clips:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"LLM returned no clip suggestions. Response: {result}",
+        llm_clips = fallback_clip_suggestions(transcript)
+        if not llm_clips:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not select a clip from the transcript.",
+            )
+        logger.warning(
+            "LLM returned no clip suggestions; using transcript fallback: %s",
+            llm_clips[0],
         )
 
     output_dir = tempfile.mkdtemp(prefix="clipgen_advanced_")

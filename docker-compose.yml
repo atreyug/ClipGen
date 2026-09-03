@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: clipgen-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-clipgen}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clipgenpass}
+      POSTGRES_DB: ${POSTGRES_DB:-clipgendb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-clipgen} -d ${POSTGRES_DB:-clipgendb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clipgen-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      # Overrides localhost to container name 'db' when running via Docker Compose
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-clipgen}:${POSTGRES_PASSWORD:-clipgenpass}@db:5432/${POSTGRES_DB:-clipgendb}
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

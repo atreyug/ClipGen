@@ -4,6 +4,8 @@ import os
 import requests
 from dotenv import load_dotenv
 
+from services.clip_selection import parse_llm_clip_response
+
 load_dotenv()
 
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
@@ -60,7 +62,7 @@ CRITICAL RULES FOR CLIP BOUNDARIES:
    - NEVER invent random timestamps.
    - ONLY combine complete transcript segments.
 
-5. AT MAX 5 BEST CLIPS SHOULD BE RETURNED.
+5. AT MIN 1 AND MAX 5 BEST CLIPS SHOULD BE RETURNED.
 
 QUALITY OVER QUANTITY:
 
@@ -217,10 +219,12 @@ Do not include explanations outside the JSON.
             )
 
 
-    if not isinstance(result, dict) or "clips" not in result:
+    try:
+        result = parse_llm_clip_response(result)
+    except (ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(
-            f"Cloudflare response is missing the 'clips' key. Got:\n{result}"
-        )
+            f"Cloudflare response has invalid clip JSON. Got:\n{result}"
+        ) from exc
     
     print(result)
 

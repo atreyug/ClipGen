@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Optional
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -57,16 +58,16 @@ def create_clips_advanced_upload(
     file_size = file.file.tell()
     file.file.seek(0)  # Reset
     
-    if file_size > 2 * 1024 * 1024 * 1024:  # 2GB
+    if file_size > 200 * 1024 * 1024:  # 200mb
         raise HTTPException(
             status_code=413,
-            detail=f"File too large: {file_size / 1024 / 1024:.1f}MB (max 2GB)"
+            detail=f"File too large: {file_size / 1024:.1f}MB (max 200MB)"
         )
+
+    print("processing start")
 
     video_path = None
     try:
-        # save_upload_to_disk should be synchronous
-        import asyncio
         video_path = save_upload_to_disk(file)
         
         result = process_video_pipeline_advanced(
@@ -117,11 +118,6 @@ def create_clips_advanced_youtube(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    
-    """Download YouTube video and generate clips with advanced options."""
-    from services.yt_downloader import download_youtube_video
-    from urllib.parse import urlparse
-
     # Validate URL scheme
     parsed = urlparse(body.url)
     if parsed.scheme not in ("http", "https"):
