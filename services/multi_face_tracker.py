@@ -7,6 +7,7 @@ KEY CHANGES:
 - Fixed confidence scoring to prioritize faces by actual relevance (size, position, stability)
 - Better dominant face selection in multi-person scenarios
 - Speaking activity now influences face priority
+- Added hysteresis to prevent flip-flopping between similar faces
 """
 
 from __future__ import annotations
@@ -74,7 +75,7 @@ class TrackedFace:
     velocity_y: float = 0.0
     mar: float = 0.0
     is_coasted: bool = False
-    # NEW: Better priority metrics
+    # Better priority metrics
     centrality_score: float = 0.0  # How centered the face is
     size_score: float = 0.0        # Relative size of the face
     stability_score: float = 1.0   # How stable tracking has been
@@ -86,7 +87,14 @@ class FrameFaceData:
     timestamp: float
     faces: List[TrackedFace]
 
-    def dominant_face(self) -> Optional[TrackedFace]:
+    def dominant_face(self, prev_dominant_id: Optional[int] = None, hysteresis: float = 0.25) -> Optional[TrackedFace]:
+        """
+        Select dominant face with hysteresis to prevent flip-flopping.
+        
+        Args:
+            prev_dominant_id: The face_id that was dominant in the previous frame
+            hysteresis: Bonus score given to the previous winner (default 0.25)
+        """
         if not self.faces:
             return None
 
@@ -94,31 +102,35 @@ class FrameFaceData:
         real_faces = [f for f in self.faces if not f.is_coasted]
         candidates = real_faces if real_faces else self.faces
 
-        # NEW: Multi-factor priority scoring
+        # Multi-factor priority scoring with hysteresis
         def priority_score(f: TrackedFace) -> float:
             # Base score from detection quality
             base = f.box.confidence
             
-            # Size matters - larger faces are usually the subject
-            size = f.size_score * 2.0
+            # Size matters - larger faces are usually the subject (INCREASED)
+            size = f.size_score * 2.5  # Increased from 2.0
             
             # Centrality - faces near center are often the subject
             centrality = f.centrality_score * 1.5
             
-            # Stability - faces that have been tracked longer are more reliable
-            stability = min(f.stability_score, 1.0) * 0.8
+            # Stability - faces that have been tracked longer are more reliable (INCREASED)
+            stability = min(f.stability_score, 1.0) * 1.0  # Increased from 0.8
             
-            # Age bonus - prefer established tracks over new detections
-            age_bonus = min(f.age / 30.0, 1.0) * 0.5
+            # Age bonus - prefer established tracks over new detections (INCREASED)
+            age_bonus = min(f.age / 30.0, 1.0) * 0.8  # Increased from 0.5
             
-            # Penalize disappeared/coasted faces
-            disappear_penalty = max(0, 1.0 - (f.disappeared * 0.1))
+            # Penalize disappeared/coasted faces (MORE AGGRESSIVE)
+            disappear_penalty = max(0, 1.0 - (f.disappeared * 0.15))  # Increased from 0.1
             
+            # REDUCED speaking bonus to prevent wild swings
             speaking_bonus = 0.0
             if f.mar > 0.08:
-                speaking_bonus = min((f.mar - 0.08) / 0.22, 1.0) * 5.0
+                speaking_bonus = min((f.mar - 0.08) / 0.22, 1.0) * 2.0  # REDUCED from 5.0
+            
+            # HYSTERESIS: Give previous winner a sticky bonus to prevent flip-flopping
+            winner_bonus = hysteresis if (prev_dominant_id is not None and f.face_id == prev_dominant_id) else 0.0
 
-            return (base + size + centrality + stability + age_bonus + speaking_bonus) * disappear_penalty
+            return (base + size + centrality + stability + age_bonus + speaking_bonus + winner_bonus) * disappear_penalty
 
         return max(candidates, key=priority_score)
 
@@ -247,7 +259,7 @@ class FaceIDTracker:
         self,
         detections: List[FaceBox],
         mars: List[float],
-        metrics: List[Dict[str, float]],  # NEW: quality metrics per detection
+        metrics: List[Dict[str, float]],
         frame_w: int,
         frame_h: int,
         target_w: int,

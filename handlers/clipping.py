@@ -34,7 +34,7 @@ def create_clips_upload(
     file: UploadFile = File(..., description="Video file to process"),
     dimensions: str = Form("9:16", description="'9:16' or '16:9'"),
     caption: bool = Form(True, description="Burn subtitles"),
-    caption_style: str = Form("classic", description="Caption style preset"),
+    caption_style: str = Form("", description="Caption style preset"),
     specification: str = Form("", description="Topic hint for LLM"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -43,9 +43,15 @@ def create_clips_upload(
     Upload a video file and generate viral clips with advanced options.
     SYNCHRONOUS endpoint - no async/await.
     """
-    multi_face= True
-    speaker_detection = True
-    active_reframe = True
+    if dimensions == "9:16":
+        multi_face= True
+        speaker_detection = True
+        active_reframe = True
+    else:
+        multi_face= False
+        speaker_detection = False
+        active_reframe = False
+    
     use_visual = True
     max_faces=2
     preferred_face_id=None
@@ -115,6 +121,15 @@ def create_clips_youtube(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    if body.dimensions == "9:16":
+        multi_face= True
+        speaker_detection = True
+        active_reframe = True
+    else:
+        multi_face= False
+        speaker_detection = False
+        active_reframe = False
+    
     parsed = urlparse(body.url)
     if parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=400, detail="Invalid URL scheme")
@@ -132,9 +147,9 @@ def create_clips_youtube(
             caption=body.caption,
             caption_style=body.caption_style,
             specification=body.specification,
-            multi_face=True,
-            speaker_detection=True,
-            active_reframe=True,
+            multi_face=multi_face,
+            speaker_detection=speaker_detection,
+            active_reframe=active_reframe,
             layout="single",
             max_faces=2,
             preferred_face_id=None,
