@@ -1,13 +1,53 @@
-# Use official Python 3.12 slim image
-FROM python:3.12-slim-bookworm
+# =========================
+# Stage 1: Builder
+# =========================
+FROM python:3.12-slim-bookworm AS builder
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    PORT=8000
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies for OpenCV, MediaPipe, FFmpeg, and Postgres
+WORKDIR /app
+
+# Build dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    make \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt .
+
+RUN pip install --upgrade pip setuptools wheel
+
+# CPU-only Torch
+RUN pip install --no-cache-dir \
+    torch==2.13.0 \
+    torchaudio==2.11.0 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Remaining dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+
+# =========================
+# Stage 2: Runtime
+# =========================
+FROM python:3.12-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libgl1 \
@@ -15,29 +55,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgles2 \
     libglib2.0-0 \
     libgomp1 \
-    libpq-dev \
-    gcc \
-    g++ \
-    make \
-    curl \
-    git \
+    libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
 
-# Copy requirements first for better layer caching
-COPY requirements.txt /app/requirements.txt
+COPY . .
 
-# Upgrade pip and install python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+EXPOSE 8080
 
-# Copy application source code
-COPY . /app/
-
-# Expose FastAPI port
-EXPOSE 8000
-
-# Default run command with live reload enabled
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
