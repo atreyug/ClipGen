@@ -18,10 +18,20 @@ _FORMAT_SELECTOR = (
     "best"
 )
 
-# Recommended Cloud Run Secret Manager mount location.
-# You can change this if you prefer another path.
+
+# Cloud Run Secret Manager mounted file
+# _YOUTUBE_COOKIES_FILE = Path(
+#     os.getenv(
+#         "YOUTUBE_COOKIES_FILE",
+#         "/app/secrets/youtube_cookies.txt",
+#     )
+# )
+
 _YOUTUBE_COOKIES_FILE = Path(
-    os.getenv("YOUTUBE_COOKIES_FILE", "/app/secrets/youtube_cookies.txt")
+    os.getenv(
+        "YOUTUBE_COOKIES_FILE",
+        "youtube_cookies.txt",
+    )
 )
 
 
@@ -29,9 +39,7 @@ def _build_ydl_options(
     output_template: str,
     player_client: str,
 ) -> dict:
-    """
-    Build yt-dlp options for one YouTube player client.
-    """
+    """Build yt-dlp options for a YouTube player client."""
 
     ydl_opts = {
         "format": _FORMAT_SELECTOR,
@@ -41,7 +49,7 @@ def _build_ydl_options(
         "merge_output_format": "mp4",
 
         "quiet": True,
-        "no_warnings": True,
+        "no_warnings": False,
 
         "overwrites": False,
 
@@ -53,12 +61,13 @@ def _build_ydl_options(
 
         "retries": 3,
         "fragment_retries": 3,
+
+        # Avoid unnecessary cache/state issues.
+        "cachedir": False,
     }
 
-    # Use authenticated YouTube cookies when Cloud Run has them mounted.
-    #
-    # This is deliberately optional so local development still works
-    # without a cookie file.
+    # IMPORTANT:
+    # Pass the mounted Cloud Run cookie file to yt-dlp.
     if _YOUTUBE_COOKIES_FILE.is_file():
         ydl_opts["cookiefile"] = str(_YOUTUBE_COOKIES_FILE)
 
@@ -71,21 +80,72 @@ def download_youtube_video(
 ) -> Path:
 
     if not youtube_url:
-        raise YouTubeDownloadError("YouTube URL is required.")
+        raise YouTubeDownloadError(
+            "YouTube URL is required."
+        )
+
+    # ---------------------------------------------------------
+    # Prepare output directory
+    # ---------------------------------------------------------
 
     if output_dir:
         download_dir = Path(output_dir)
-        download_dir.mkdir(parents=True, exist_ok=True)
+        download_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
     else:
-        download_dir = Path(mkdtemp(prefix="clipgen_"))
+        download_dir = Path(
+            mkdtemp(prefix="clipgen_")
+        )
 
-    output_template = str(download_dir / "%(id)s.%(ext)s")
+    output_template = str(
+        download_dir / "%(id)s.%(ext)s"
+    )
 
-    cookies_available = _YOUTUBE_COOKIES_FILE.is_file()
+    # ---------------------------------------------------------
+    # Check cookies
+    # ---------------------------------------------------------
+
+    cookies_available = (
+        _YOUTUBE_COOKIES_FILE.is_file()
+    )
+
+    if cookies_available:
+        cookie_size = (
+            _YOUTUBE_COOKIES_FILE.stat().st_size
+        )
+
+        print(
+            f"YouTube cookies found: "
+            f"{_YOUTUBE_COOKIES_FILE}"
+        )
+
+        print(
+            f"YouTube cookie file size: "
+            f"{cookie_size} bytes"
+        )
+
+    else:
+        print(
+            "WARNING: YouTube cookie file not found:"
+        )
+        print(
+            f"  {_YOUTUBE_COOKIES_FILE}"
+        )
+
+    # ---------------------------------------------------------
+    # Try YouTube player clients
+    # ---------------------------------------------------------
 
     last_error: Optional[Exception] = None
 
     for player_client in _PLAYER_CLIENT_FALLBACKS:
+
+        print(
+            f"Trying YouTube player client: "
+            f"{player_client}"
+        )
 
         ydl_opts = _build_ydl_options(
             output_template=output_template,
@@ -93,6 +153,7 @@ def download_youtube_video(
         )
 
         try:
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
 
                 info = ydl.extract_info(
@@ -102,21 +163,26 @@ def download_youtube_video(
 
                 if not info:
                     raise YouTubeDownloadError(
-                        "Unable to retrieve YouTube video information."
+                        "Unable to retrieve YouTube "
+                        "video information."
                     )
 
                 downloaded_file = Path(
                     ydl.prepare_filename(info)
                 )
 
+                # yt-dlp may merge the streams into MP4.
                 if not downloaded_file.exists():
 
-                    mp4_file = downloaded_file.with_suffix(".mp4")
+                    mp4_file = (
+                        downloaded_file.with_suffix(".mp4")
+                    )
 
                     if mp4_file.exists():
                         downloaded_file = mp4_file
 
                     else:
+
                         files = list(
                             download_dir.glob(
                                 f"{info['id']}.*"
@@ -128,35 +194,83 @@ def download_youtube_video(
                                 "Video was not downloaded."
                             )
 
-                        downloaded_file = files[0]
+                        # Prefer actual video files.
+                        video_files = [
+                            f
+                            for f in files
+                            if f.suffix.lower()
+                            in {
+                                ".mp4",
+                                ".mkv",
+                                ".webm",
+                                ".mov",
+                            }
+                        ]
+
+                        if video_files:
+                            downloaded_file = (
+                                video_files[0]
+                            )
+                        else:
+                            downloaded_file = files[0]
+
+                print(
+                    f"YouTube video downloaded: "
+                    f"{downloaded_file}"
+                )
 
                 return downloaded_file
 
         except yt_dlp.utils.DownloadError as exc:
+
             last_error = exc
+
+            print(
+                f"YouTube client '{player_client}' "
+                f"failed:"
+            )
+            print(exc)
+
             continue
 
         except YouTubeDownloadError:
             raise
 
         except Exception as exc:
+
             last_error = exc
+
+            print(
+                f"Unexpected error with "
+                f"'{player_client}': {exc}"
+            )
+
             continue
 
+    # ---------------------------------------------------------
+    # All clients failed
+    # ---------------------------------------------------------
+
     if cookies_available:
+
         auth_status = (
-            "YouTube cookies were provided, but YouTube still rejected "
-            "the request. The cookies may be expired or invalid."
+            "The YouTube cookie file was found and "
+            "provided to yt-dlp, but YouTube rejected "
+            "the request. The cookies may be expired, "
+            "invalid, or YouTube may be rejecting the "
+            "Cloud Run request."
         )
+
     else:
+
         auth_status = (
-            "No YouTube cookie file was found. "
-            "Configure the YOUTUBE_COOKIES_FILE secret on Cloud Run."
+            "The YouTube cookie file was not found at "
+            f"{_YOUTUBE_COOKIES_FILE}."
         )
 
     raise YouTubeDownloadError(
-        f"Failed to download YouTube video after trying player clients "
-        f"{_PLAYER_CLIENT_FALLBACKS}. "
+        "Failed to download YouTube video after trying "
+        f"player clients {_PLAYER_CLIENT_FALLBACKS}. "
         f"{auth_status} "
         f"Last error: {last_error}"
     ) from last_error
